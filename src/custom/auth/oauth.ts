@@ -315,56 +315,6 @@ const uniqueScopes = (value: string, responseStatus: number): readonly string[] 
   return scopes
 }
 
-const validateAccessTokenClaims = (
-  accessToken: string,
-  issuer: string,
-  user: UserInfo,
-  responseStatus: number,
-): void => {
-  const parts = accessToken.split('.')
-  if (parts.length !== 3) return
-  const header = jwtObject(parts[0] ?? '')
-  if (!header || typeof header.alg !== 'string') return
-  try {
-    const raw = parts[1]
-    if (!raw) throw new ClerkOAuthError('invalid_token_response', { status: responseStatus })
-    const value: unknown = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'))
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
-      throw new ClerkOAuthError('invalid_token_response', { status: responseStatus })
-    }
-    const claims = value as Record<string, unknown>
-    if (typeof claims.iss === 'string') {
-      try {
-        if (validIssuer(claims.iss).origin !== issuer) {
-          throw new ClerkOAuthError('issuer_mismatch', { status: responseStatus })
-        }
-      } catch {
-        throw new ClerkOAuthError('issuer_mismatch', { status: responseStatus })
-      }
-    }
-    if (typeof claims.sub === 'string' && claims.sub !== user.userId) {
-      throw new ClerkOAuthError('userinfo_mismatch', { status: responseStatus })
-    }
-    if (typeof claims.org_id === 'string' && claims.org_id !== user.organizationId) {
-      throw new ClerkOAuthError('userinfo_mismatch', { status: responseStatus })
-    }
-  } catch (error) {
-    if (error instanceof ClerkOAuthError) throw error
-    throw new ClerkOAuthError('invalid_token_response', { cause: error, status: responseStatus })
-  }
-}
-
-const jwtObject = (value: string): Record<string, unknown> | undefined => {
-  try {
-    const decoded: unknown = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
-    return decoded !== null && typeof decoded === 'object' && !Array.isArray(decoded)
-      ? decoded as Record<string, unknown>
-      : undefined
-  } catch {
-    return undefined
-  }
-}
-
 const defaultOpenBrowser = async (url: string): Promise<void> => {
   const { default: open } = await import('open')
   await open(url)
