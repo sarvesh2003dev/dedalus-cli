@@ -221,7 +221,7 @@ test('invariant workload flags do not construct a lower-priority credential stor
   let options
   const program = resourceProgram((command) => { options = command.optsWithGlobals() })
   addDedalusCommands(program, {
-    environment: { DEDALUS_CREDENTIAL_STORE: 'invalid' },
+    credentialStore: () => { throw new Error('must not construct credential store') },
   })
 
   await program.parseAsync(['node', 'dedalus', '--api-key', 'flag-key', 'machines'])
@@ -235,10 +235,8 @@ test('invariant workload environment keys do not construct a lower-priority cred
   let options
   const program = resourceProgram((command) => { options = command.optsWithGlobals() })
   addDedalusCommands(program, {
-    environment: {
-      DEDALUS_API_KEY: 'environment-key',
-      DEDALUS_CREDENTIAL_STORE: 'invalid',
-    },
+    credentialStore: () => { throw new Error('must not construct credential store') },
+    environment: { DEDALUS_API_KEY: 'environment-key' },
   })
 
   await program.parseAsync(['node', 'dedalus', 'machines'])
@@ -372,10 +370,8 @@ test('invariant environment-key status does not construct a lower-priority crede
   let output = ''
   const program = new Command()
   addDedalusCommands(program, {
-    environment: {
-      DEDALUS_API_KEY: 'environment-key',
-      DEDALUS_CREDENTIAL_STORE: 'invalid',
-    },
+    credentialStore: () => { throw new Error('must not construct credential store') },
+    environment: { DEDALUS_API_KEY: 'environment-key' },
     writeOutput: (value) => { output += value },
   })
 
