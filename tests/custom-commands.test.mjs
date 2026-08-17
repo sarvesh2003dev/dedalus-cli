@@ -450,3 +450,390 @@ test('invariant root JSON override also applies to auth commands', async () => {
 
   assert.deepEqual(JSON.parse(output), { status: 'not_logged_in', credential_source: 'none' })
 })
+test('invariant repeat login reports provider-neutral session metadata', async () => {
+  let output = ''
+  const program = new Command()
+  addDedalusCommands(program, {
+    auth: () => ({
+      login: async () => ({ status: 'already_signed_in', session: metadata }),
+      status: async () => ({ source: 'none' }),
+      logout: async () => ({ status: 'not_logged_in', revocationConfirmed: false }),
+    }),
+    writeOutput: (value) => { output += value },
+  })
+
+  await program.parseAsync(['node', 'dedalus', 'auth', 'login', '--json'])
+
+  assert.equal(JSON.parse(output).credential_source, 'oauth_session')
+  assert.equal(JSON.parse(output).organization.id, 'org_cli')
+  assert.equal(output.includes('oauth-access-token'), false)
+})
+
+test('invariant logout reports partial provider revocation accurately', async () => {
+  let output = ''
+  const program = new Command()
+  addDedalusCommands(program, {
+    auth: () => ({
+      login: async () => ({ status: 'logged_in', session: metadata }),
+      status: async () => ({ source: 'none' }),
+      logout: async () => ({ status: 'logged_out', revocationConfirmed: false }),
+    }),
+    writeOutput: (value) => { output += value },
+  })
+
+  await program.parseAsync(['node', 'dedalus', 'auth', 'logout', '--json'])
+
+  assert.deepEqual(JSON.parse(output), {
+    status: 'logged_out',
+    local_tokens_removed: true,
+    revocation_confirmed: false,
+  })
+})
+
+test('invariant logout removes local tokens when provider configuration is invalid', async () => {
+  let output = ''
+  let stored = session()
+  const credentialStore = {
+    ...store(),
+    read: async () => stored,
+    remove: async () => {
+      stored = null
+      return true
+    },
+  }
+  const program = new Command()
+  addDedalusCommands(program, {
+    environment: { DEDALUS_CLERK_ISSUER: 'invalid-unpaired-override' },
+    credentialStore: () => credentialStore,
+    writeOutput: (value) => { output += value },
+  })
+
+  await program.parseAsync(['node', 'dedalus', 'auth', 'logout', '--json'])
+
+  assert.deepEqual(JSON.parse(output), {
+    status: 'logged_out',
+    local_tokens_removed: true,
+    revocation_confirmed: false,
+  })
+  assert.equal(stored, null)
+})
+
+test('invariant unexpected auth failures never expose internal detail', async () => {
+  let output = ''
+  const program = new Command()
+  addDedalusCommands(program, {
+    auth: () => ({
+      login: async () => { throw new Error('secret provider detail') },
+      status: async () => ({ source: 'none' }),
+      logout: async () => ({ status: 'not_logged_in', revocationConfirmed: false }),
+    }),
+    writeError: (value) => { output += value },
+  })
+
+  await program.parseAsync(['node', 'dedalus', 'auth', 'login', '--json'])
+
+  assert.equal(JSON.parse(output).error.code, 'cli_authentication_failed')
+  assert.equal(JSON.parse(output).error.credential_source, 'oauth_session')
+  assert.equal(output.includes('secret provider detail'), false)
+  process.exitCode = 0
+})
+
+test('invariant human auth errors retain their stable code', async () => {
+  let output = ''
+  const program = new Command()
+  addDedalusCommands(program, {
+    auth: () => ({
+      login: async () => { throw new AuthProviderError('access_denied', { stage: 'provider' }) },
+      status: async () => ({ source: 'none' }),
+      logout: async () => ({ status: 'not_logged_in', revocationConfirmed: false }),
+    }),
+    writeError: (value) => { output += value },
+  })
+
+  await program.parseAsync(['node', 'dedalus', 'auth', 'login'])
+
+  assert.equal(output, 'access_denied: Login was canceled or denied.\n')
+  process.exitCode = 0
+})
+
+test('invariant provider errors preserve safe codes and retry policy', async () => {
+  let output = ''
+  const program = new Command()
+  addDedalusCommands(program, {
+    auth: () => ({
+      login: async () => { throw new AuthProviderError('temporarily_unavailable', { stage: 'provider' }) },
+      status: async () => ({ source: 'none' }),
+      logout: async () => ({ status: 'not_logged_in', revocationConfirmed: false }),
+    }),
+    writeError: (value) => { output += value },
+  })
+
+  await program.parseAsync(['node', 'dedalus', 'auth', 'login', '--json'])
+
+  assert.deepEqual(JSON.parse(output), {
+    error: {
+      code: 'temporarily_unavailable',
+      message: 'Authentication is temporarily unavailable. Try again.',
+      retryable: true,
+      credential_source: 'oauth_session',
+    },
+  })
+  process.exitCode = 0
+})
+
+test('invariant local OAuth failures use the CLI code namespace', async () => {
+  let output = ''
+  const program = new Command()
+  addDedalusCommands(program, {
+    auth: () => ({
+      login: async () => { throw new AuthProviderError('state_mismatch') },
+      status: async () => ({ source: 'none' }),
+      logout: async () => ({ status: 'not_logged_in', revocationConfirmed: false }),
+    }),
+    writeError: (value) => { output += value },
+  })
+
+  await program.parseAsync(['node', 'dedalus', 'auth', 'login', '--json'])
+  assert.equal(JSON.parse(output).error.code, 'cli_state_mismatch')
+  process.exitCode = 0
+})
+
+test('invariant OAuth requests without a response use the CLI network code', async () => {
+  let output = ''
+  const program = new Command()
+  addDedalusCommands(program, {
+    auth: () => ({
+      login: async () => {
+        throw new AuthProviderError('token_exchange_failed', { stage: 'network' })
+      },
+      status: async () => ({ source: 'none' }),
+      logout: async () => ({ status: 'not_logged_in', revocationConfirmed: false }),
+    }),
+    writeError: (value) => { output += value },
+  })
+
+  await program.parseAsync(['node', 'dedalus', 'auth', 'login', '--json'])
+
+  assert.deepEqual(JSON.parse(output).error, {
+    code: 'cli_network_error',
+    message: 'Authentication service is temporarily unavailable. Try again.',
+    retryable: true,
+    credential_source: 'oauth_session',
+  })
+  process.exitCode = 0
+})
+
+test('invariant provider HTTP errors preserve unknown provider codes exactly', async () => {
+  let output = ''
+  const program = new Command()
+  addDedalusCommands(program, {
+    auth: () => ({
+      login: async () => {
+        throw new AuthProviderError('new_provider_code', { stage: 'provider', status: 418 })
+      },
+      status: async () => ({ source: 'none' }),
+      logout: async () => ({ status: 'not_logged_in', revocationConfirmed: false }),
+    }),
+    writeError: (value) => { output += value },
+  })
+
+  await program.parseAsync(['node', 'dedalus', 'auth', 'login', '--json'])
+
+  const error = JSON.parse(output).error
+  assert.equal(error.code, 'new_provider_code')
+  assert.equal(error.http_status, 418)
+  assert.equal(error.code.startsWith('cli_'), false)
+  process.exitCode = 0
+})
+
+test('invariant local response validation remains in the CLI error namespace', async () => {
+  let output = ''
+  const program = new Command()
+  addDedalusCommands(program, {
+    auth: () => ({
+      login: async () => { throw new AuthProviderError('invalid_token_response', { status: 200 }) },
+      status: async () => ({ source: 'none' }),
+      logout: async () => ({ status: 'not_logged_in', revocationConfirmed: false }),
+    }),
+    writeError: (value) => { output += value },
+  })
+
+  await program.parseAsync(['node', 'dedalus', 'auth', 'login', '--json'])
+
+  assert.deepEqual(JSON.parse(output).error, {
+    code: 'cli_invalid_token_response',
+    message: "Login could not be completed. Run 'dedalus auth login' again.",
+    retryable: false,
+    http_status: 200,
+    credential_source: 'oauth_session',
+  })
+  process.exitCode = 0
+})
+
+test('invariant invalid grants give a recoverable login sequence', async () => {
+  let output = ''
+  const program = new Command()
+  addDedalusCommands(program, {
+    auth: () => ({
+      login: async () => {
+        throw new AuthProviderError('invalid_grant', { stage: 'provider', status: 400 })
+      },
+      status: async () => ({ source: 'none' }),
+      logout: async () => ({ status: 'not_logged_in', revocationConfirmed: false }),
+    }),
+    writeError: (value) => { output += value },
+  })
+
+  await program.parseAsync(['node', 'dedalus', 'auth', 'login'])
+
+  assert.equal(
+    output,
+    "invalid_grant: Login expired or could not be verified. Run 'dedalus auth logout', then 'dedalus auth login'.\n",
+  )
+  process.exitCode = 0
+})
+
+test('invariant provider error codes cannot inject terminal control characters', async () => {
+  let output = ''
+  const program = new Command()
+  addDedalusCommands(program, {
+    auth: () => ({
+      login: async () => {
+        throw new AuthProviderError('\u001b[31mprovider_error', { stage: 'provider', status: 400 })
+      },
+      status: async () => ({ source: 'none' }),
+      logout: async () => ({ status: 'not_logged_in', revocationConfirmed: false }),
+    }),
+    writeError: (value) => { output += value },
+  })
+
+  await program.parseAsync(['node', 'dedalus', 'auth', 'login'])
+
+  assert.equal(output, "oauth_error: Login could not be completed. Run 'dedalus auth login' again.\n")
+  process.exitCode = 0
+})
+
+test('invariant generated API errors read the real Scalar error body and preserve server codes', async () => {
+  let actionCommand
+  const program = resourceProgram((command) => { actionCommand = command })
+  addDedalusCommands(program, {
+    environment: { DEDALUS_API_KEY: 'must-not-print' },
+    credentialStore: () => store(),
+  })
+
+  await program.parseAsync(['node', 'dedalus', 'machines'])
+  const body = formatDedalusError({
+    status: 403,
+    error: {
+      error_code: 'AUTH_ORG_MISMATCH',
+      message: 'must-not-print',
+      retryable: false,
+    },
+  }, actionCommand)
+
+  assert.deepEqual(body, {
+    error: {
+      code: 'AUTH_ORG_MISMATCH',
+      message: 'This credential does not have permission for that operation.',
+      retryable: false,
+      http_status: 403,
+      credential_source: 'environment',
+    },
+  })
+  assert.equal(JSON.stringify(body).includes('must-not-print'), false)
+})
+
+test('invariant generated 401 and 5xx errors retain gateway-owned codes', async () => {
+  let actionCommand
+  const program = resourceProgram((command) => { actionCommand = command })
+  addDedalusCommands(program, {
+    environment: { DEDALUS_API_KEY: 'workload-key' },
+    credentialStore: () => store(),
+  })
+  await program.parseAsync(['node', 'dedalus', 'machines'])
+
+  const unauthorized = formatDedalusError({
+    status: 401,
+    error: { error_code: 'AUTH_INVALID', retryable: false },
+  }, actionCommand)
+  const unavailable = formatDedalusError({
+    status: 503,
+    error: { error_code: 'NEW_GATEWAY_OUTAGE_CODE', retryable: true },
+  }, actionCommand)
+
+  assert.deepEqual(unauthorized.error, {
+    code: 'AUTH_INVALID',
+    message: 'Dedalus rejected the request.',
+    retryable: false,
+    http_status: 401,
+    credential_source: 'environment',
+  })
+  assert.deepEqual(unavailable.error, {
+    code: 'NEW_GATEWAY_OUTAGE_CODE',
+    message: 'Dedalus is temporarily unavailable. Try again.',
+    retryable: true,
+    http_status: 503,
+    credential_source: 'environment',
+  })
+})
+
+test('invariant gateway error codes cannot inject terminal control characters', async () => {
+  let actionCommand
+  const program = resourceProgram((command) => { actionCommand = command })
+  addDedalusCommands(program, { environment: { DEDALUS_API_KEY: 'workload-key' } })
+  await program.parseAsync(['node', 'dedalus', 'machines'])
+
+  const body = formatDedalusError({
+    status: 403,
+    error: { error_code: 'AUTH_DENIED\nforged-output', retryable: false },
+  }, actionCommand)
+
+  assert.equal(body.error.code, 'insufficient_scope')
+  assert.equal(JSON.stringify(body).includes('forged-output'), false)
+})
+
+test('invariant generated network failures are local and have no HTTP status', async () => {
+  let actionCommand
+  const program = resourceProgram((command) => { actionCommand = command })
+  addDedalusCommands(program, {
+    environment: { DEDALUS_API_KEY: 'workload-key' },
+    credentialStore: () => store(),
+  })
+
+  await program.parseAsync(['node', 'dedalus', 'machines'])
+  const body = formatDedalusError({ status: undefined, error: undefined }, actionCommand)
+
+  assert.equal(body.error.code, 'cli_network_error')
+  assert.equal('http_status' in body.error, false)
+  assert.equal(body.error.credential_source, 'environment')
+})
+
+test('invariant a missing credential is reported as source none without a fake HTTP response', async () => {
+  let actionCommand
+  let networkCalls = 0
+  const program = resourceProgram((command) => {
+    actionCommand = command
+    command.optsWithGlobals().bearerAuth()
+    networkCalls += 1
+  })
+  addDedalusCommands(program, {
+    environment: {},
+    credentialStore: () => store(null),
+    authProvider: () => provider(),
+  })
+
+  let failure
+  await assert.rejects(
+    program.parseAsync(['node', 'dedalus', 'machines']),
+    (error) => { failure = error; return error instanceof Error && error.code === 'not_logged_in' },
+  )
+  const body = formatDedalusError(failure, actionCommand)
+
+  assert.deepEqual(body.error, {
+    code: 'cli_no_credential',
+    message: "Not logged in. Run 'dedalus auth login'.",
+    retryable: false,
+    credential_source: 'none',
+  })
+  assert.equal(networkCalls, 0)
+})
