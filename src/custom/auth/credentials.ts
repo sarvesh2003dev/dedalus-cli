@@ -139,7 +139,7 @@ export const resolveCredential = async (
   }
 }
 
-const hasCredentialCustomHeader = (value: string | undefined): boolean => {
+export const hasCredentialCustomHeader = (value: string | undefined): boolean => {
   if (value === undefined) return false
   return value.split('\n').some((line) => {
     const separator = line.indexOf(':')

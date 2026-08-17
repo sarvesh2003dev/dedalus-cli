@@ -3,6 +3,7 @@ import { Command } from 'commander'
 import {
   CredentialStorageError,
   defaultCredentialStore,
+  hasCredentialCustomHeader,
   type CredentialStore,
 } from './auth/credentials.js'
 import { createClerkAuthProvider } from './auth/oauth.js'
@@ -80,7 +81,6 @@ export const addDedalusCommands = (
   ))
   const writeOutput = options.writeOutput ?? ((value) => process.stdout.write(value))
   const writeError = options.writeError ?? ((value) => process.stderr.write(value))
-  installWorkloadAPIKeyOption(program)
   installJSONConvenience(program)
   const auth = new Command(authCommandName).description('Manage the stored Dedalus CLI login')
 
@@ -184,13 +184,39 @@ export const cliAuthConfiguration = (
 } => {
   const issuerOverride = environment.DEDALUS_CLERK_ISSUER
   const clientIDOverride = environment.DEDALUS_CLERK_CLIENT_ID
-  if ((issuerOverride === undefined) !== (clientIDOverride === undefined)) {
+  if (
+    (issuerOverride !== undefined && issuerOverride !== defaultClerkIssuer) ||
+    (clientIDOverride !== undefined && clientIDOverride !== defaultClerkClientID)
+  ) {
     throw new AuthProviderError('invalid_configuration')
   }
+  const signInURL = cliSignInURL(environment.DEDALUS_SIGN_IN_URL ?? defaultSignInURL)
   return {
-    issuer: issuerOverride ?? defaultClerkIssuer,
-    clientId: clientIDOverride ?? defaultClerkClientID,
-    signInURL: environment.DEDALUS_SIGN_IN_URL ?? defaultSignInURL,
+    issuer: defaultClerkIssuer,
+    clientId: defaultClerkClientID,
+    signInURL,
+  }
+}
+
+const cliSignInURL = (raw: string): string => {
+  if (raw === defaultSignInURL) return raw
+  try {
+    const value = new URL(raw)
+    if (
+      value.protocol !== 'http:' ||
+      (value.hostname !== '127.0.0.1' && value.hostname !== 'localhost') ||
+      value.username ||
+      value.password ||
+      value.search ||
+      value.hash ||
+      value.pathname !== '/cli/sign-in'
+    ) {
+      throw new AuthProviderError('invalid_configuration')
+    }
+    return value.toString()
+  } catch (error) {
+    if (error instanceof AuthProviderError) throw error
+    throw new AuthProviderError('invalid_configuration', { cause: error })
   }
 }
 
@@ -236,7 +262,7 @@ const installCredentialInjection = (
         setCommandOption(action, 'baseUrl', gatewayURL)
         setCredentialOptions(action, null, null, accessToken)
       } else if (selected.transport === 'bearer') {
-        setCredentialOptions(action, null, null, selected.value)
+        setCredentialOptions(action, selected.value, null, null)
       } else {
         setCredentialOptions(action, null, selected.value, null)
       }
@@ -244,19 +270,6 @@ const installCredentialInjection = (
       setCredentialOptions(action, null, null, rejectedCredential(error))
     }
   })
-}
-
-// Workload keys and OAuth tokens share the OpenAPI BearerAuth transport but
-// remain separate credential sources. Keep the workload-facing flag stable
-// even when Scalar emits only the shared bearer option.
-const installWorkloadAPIKeyOption = (program: Command): void => {
-  const visit = (command: Command): void => {
-    if (!command.options.some((option) => option.long === '--api-key')) {
-      command.option('--api-key <value>', 'Use a workload API key for this command')
-    }
-    for (const child of command.commands) visit(child)
-  }
-  visit(program)
 }
 
 export const cliOAuthGatewayURL = (
@@ -307,6 +320,7 @@ const intendedCredential = (
     return { source: 'flag' }
   }
   if (
+    hasCredentialCustomHeader(environment.DEDALUS_CUSTOM_HEADERS) ||
     environment.DEDALUS_API_KEY !== undefined ||
     environment.DEDALUS_X_API_KEY !== undefined ||
     environment.DEDALUS_BEARER_AUTH !== undefined
