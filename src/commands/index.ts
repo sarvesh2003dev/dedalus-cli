@@ -4,6 +4,7 @@ import type { Command } from 'commander'
 import SDK from '../sdk/index'
 import { createProgram, type CliClientOptionDefinition, type CliCommandDefinition } from '../cli/runtime'
 import { completions } from '../cli/completions'
+import { addDedalusCommands, formatDedalusError } from '../custom/commands'
 
 const clientOptions = [
   {
@@ -65,7 +66,7 @@ const clientOptions = [
 const commands = [] as const satisfies readonly CliCommandDefinition[]
 
 export const getProgram = (): Command =>
-  createProgram({
+  addDedalusCommands(createProgram({
     SDK,
     binaryName: "dedalus",
     version: "0.1.0", // x-release-please-version
@@ -74,5 +75,6 @@ export const getProgram = (): Command =>
     defaultErrorFormat: "auto",
     clientOptions,
     commands,
+    formatError: formatDedalusError,
     completions,
-  })
+  }))

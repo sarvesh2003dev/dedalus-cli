@@ -70,6 +70,7 @@ export type CreateProgramOptions = {
   readonly defaultErrorFormat: OutputFormat
   readonly clientOptions: readonly CliClientOptionDefinition[]
   readonly commands: readonly CliCommandDefinition[]
+  readonly formatError?: (error: unknown, command: Command) => Record<string, unknown> | undefined
   // Completion script per shell, generated alongside the command table. Absent when the SDK
   // config disables shell completions, in which case no `completion` command is registered.
   readonly completions?: Readonly<Record<string, string>>
@@ -99,7 +100,7 @@ type GlobalOptions = {
   readonly maxItems?: string
 }
 
-export const createProgram = ({ SDK, binaryName, version, description, defaultFormat, defaultErrorFormat, clientOptions, commands, completions }: CreateProgramOptions): Command => {
+export const createProgram = ({ SDK, binaryName, version, description, defaultFormat, defaultErrorFormat, clientOptions, commands, formatError, completions }: CreateProgramOptions): Command => {
   const program = new Command()
   program
     .enablePositionalOptions()
@@ -123,7 +124,7 @@ export const createProgram = ({ SDK, binaryName, version, description, defaultFo
     program.option("--" + option.name + " <value>", clientOptionDescription(option))
   }
 
-  for (const definition of commands) addGeneratedCommand(program, SDK, clientOptions, definition)
+  for (const definition of commands) addGeneratedCommand(program, SDK, clientOptions, definition, formatError)
 
   if (completions) addCompletionCommand(program, binaryName, completions)
 
@@ -178,6 +179,7 @@ const addGeneratedCommand = (
   SDK: CreateProgramOptions["SDK"],
   clientOptions: readonly CliClientOptionDefinition[],
   definition: CliCommandDefinition,
+  formatError: CreateProgramOptions['formatError'],
 ): void => {
   const parent = ensureCommandPath(program, definition.commandPath.slice(0, -1))
   const commandName = definition.commandPath.at(-1) ?? definition.methodName
@@ -234,7 +236,7 @@ const addGeneratedCommand = (
     const command = args.at(-1)
     if (!(command instanceof Command)) throw new Error("Expected Commander command context")
     const positionalValues = args.slice(0, -1)
-    await runGeneratedCommand(SDK, clientOptions, definition, command, positionalValues)
+    await runGeneratedCommand(SDK, clientOptions, definition, command, positionalValues, formatError)
   })
 
   parent.addCommand(command)
@@ -261,6 +263,7 @@ const runGeneratedCommand = async (
   definition: CliCommandDefinition,
   command: Command,
   positionalValues: readonly unknown[],
+  formatError: CreateProgramOptions['formatError'],
 ): Promise<void> => {
   const rootOptions = command.optsWithGlobals<GlobalOptions>()
   const commandOptions = command.opts<GlobalOptions>()
@@ -311,7 +314,7 @@ const runGeneratedCommand = async (
 
     await writeOutput(resolved, outputOptions)
   } catch (error) {
-    await writeError(error, errorOptions, clientOptions)
+    await writeError(error, errorOptions, clientOptions, command, formatError)
     process.exitCode = 1
   }
 }
@@ -676,8 +679,10 @@ const writeError = async (
   error: unknown,
   options: OutputOptions,
   clientOptions: readonly CliClientOptionDefinition[],
+  command: Command,
+  formatError: CreateProgramOptions['formatError'],
 ): Promise<void> => {
-  const body = transformValue(errorBody(error, clientOptions), options.transform)
+  const body = transformValue(formatError?.(error, command) ?? errorBody(error, clientOptions), options.transform)
   if (options.rawOutput && typeof body === "string") {
     process.stderr.write(body + "\n")
     return

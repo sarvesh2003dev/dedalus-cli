@@ -54,6 +54,293 @@ export type DedalusCommandOptions = {
 
 // addDedalusCommands is the boundary between generated resource commands and
 // Dedalus-owned authentication behavior. Scalar regeneration must preserve it.
+export const addDedalusCommands = (
+  program: Command,
+  options: DedalusCommandOptions = {},
+): Command => {
+  if (program.commands.some((command) => command.name() === authCommandName)) {
+    throw new Error(`Scalar generated the reserved '${authCommandName}' command`)
+  }
+
+  const environment = options.environment ?? process.env
+  let stored: CredentialStore | undefined
+  const credentialStore = options.credentialStore ?? (() => {
+    stored ??= defaultCredentialStore({ environment })
+    return stored
+  })
+  let configuredProvider: AuthProvider | undefined
+  const authProvider = options.authProvider ?? (() => {
+    configuredProvider ??= defaultAuthProvider(environment)
+    return configuredProvider
+  })
+  const operations = options.auth ?? (() => defaultAuthOperations(
+    environment,
+    credentialStore,
+    authProvider,
+  ))
+  const writeOutput = options.writeOutput ?? ((value) => process.stdout.write(value))
+  const writeError = options.writeError ?? ((value) => process.stderr.write(value))
+  installWorkloadAPIKeyOption(program)
+  installJSONConvenience(program)
+  const auth = new Command(authCommandName).description('Manage the stored Dedalus CLI login')
+
+  auth.command('login')
+    .description('Sign in through Clerk and store the OAuth session')
+    .option('--json', 'Print structured JSON output')
+    .action(async (_commandOptions: unknown, command: Command) => runAuthAction(
+      async () => loginOutput(await operations().login()),
+      'oauth_session',
+      jsonRequested(command),
+      writeOutput,
+      writeError,
+    ))
+
+  auth.command('status')
+    .description('Show the active credential source without revealing secrets')
+    .option('--api-key <value>', 'Inspect an explicit Bearer API-key override')
+    .option('--x-api-key <value>', 'Inspect an explicit X-API-Key override')
+    .option('--offline', 'Read stored session metadata without contacting Clerk')
+    .option('--json', 'Print structured JSON output')
+    .action(async (
+      commandOptions: { readonly json?: boolean; readonly offline?: boolean },
+      command: Command,
+    ) => {
+      const flags = command.optsWithGlobals<{
+        readonly apiKey?: string
+        readonly bearerAuth?: string
+        readonly xApiKey?: string
+      }>()
+      return runAuthAction(
+        async () => statusOutput(await operations().status(flags, Boolean(commandOptions.offline))),
+        intendedCredential(flags, environment).source,
+        jsonRequested(command),
+        writeOutput,
+        writeError,
+      )
+    })
+
+  auth.command('logout')
+    .description('Revoke the provider token when possible and remove local tokens')
+    .option('--json', 'Print structured JSON output')
+    .action(async (_commandOptions: unknown, command: Command) => runAuthAction(
+      async () => logoutOutput(await operations().logout()),
+      'oauth_session',
+      jsonRequested(command),
+      writeOutput,
+      writeError,
+    ))
+
+  auth.action(() => auth.help())
+  program.addCommand(auth)
+  installCredentialInjection(program, environment, credentialStore, authProvider)
+  return program
+}
+
+const installJSONConvenience = (program: Command): void => {
+  if (!program.options.some((option) => option.long === '--json')) {
+    program.option('--json', 'Print structured JSON output')
+  }
+  const visit = (command: Command): void => {
+    if (
+      command.options.some((option) => option.long === '--format') &&
+      !command.options.some((option) => option.long === '--json')
+    ) {
+      command.option('--json', 'Print structured JSON output')
+    }
+    for (const child of command.commands) visit(child)
+  }
+  for (const command of program.commands) visit(command)
+
+  program.hook('preAction', async (_root, action) => {
+    if (belongsTo(action, authCommandName) || !jsonRequested(action)) return
+    setCommandOption(action, 'format', 'json')
+    setCommandOption(action, 'formatError', 'json')
+  })
+}
+
+const jsonRequested = (command: Command): boolean =>
+  Boolean(command.optsWithGlobals<{ readonly json?: boolean }>().json)
+
+const defaultAuthProvider = (
+  environment: Readonly<Record<string, string | undefined>>,
+): AuthProvider => createClerkAuthProvider(cliAuthConfiguration(environment))
+
+const defaultAuthOperations = (
+  environment: Readonly<Record<string, string | undefined>>,
+  store: () => CredentialStore,
+  provider: () => AuthProvider,
+): AuthOperations => ({
+  login: () => login({ provider: provider(), store: store() }),
+  status: (flags, offline) => status({ flags, environment }, store, provider, offline),
+  logout: () => logout(store(), provider),
+})
+
+export const cliAuthConfiguration = (
+  environment: Readonly<Record<string, string | undefined>>,
+): {
+  readonly issuer: string
+  readonly clientId: string
+  readonly signInURL: string
+} => {
+  const issuerOverride = environment.DEDALUS_CLERK_ISSUER
+  const clientIDOverride = environment.DEDALUS_CLERK_CLIENT_ID
+  if ((issuerOverride === undefined) !== (clientIDOverride === undefined)) {
+    throw new AuthProviderError('invalid_configuration')
+  }
+  return {
+    issuer: issuerOverride ?? defaultClerkIssuer,
+    clientId: clientIDOverride ?? defaultClerkClientID,
+    signInURL: environment.DEDALUS_SIGN_IN_URL ?? defaultSignInURL,
+  }
+}
+
+const installCredentialInjection = (
+  program: Command,
+  environment: Readonly<Record<string, string | undefined>>,
+  credentialStore: () => CredentialStore,
+  authProvider: () => AuthProvider,
+): void => {
+  program.hook('preAction', async (_root, action) => {
+    if (belongsTo(action, authCommandName) || belongsTo(action, completionCommandName)) return
+    const flags = action.optsWithGlobals<{
+      readonly apiKey?: string
+      readonly baseUrl?: string
+      readonly bearerAuth?: string
+      readonly xApiKey?: string
+    }>()
+    const intended = intendedCredential(flags, environment)
+    credentialSources.set(action, intended)
+    setCredentialOptions(action, null, null, null)
+
+    try {
+      const selected = await selectedCredential({ flags, environment }, credentialStore)
+      if (!selected) {
+        credentialSources.set(action, { source: 'none' })
+        setCredentialOptions(
+          action,
+          null,
+          null,
+          rejectedCredential(new CredentialStorageError('not_logged_in')),
+        )
+        return
+      }
+      credentialSources.set(action, {
+        source: selected.source,
+        ...(selected.source === 'environment'
+          ? { label: selected.transport === 'bearer' ? 'DEDALUS_API_KEY' : 'DEDALUS_X_API_KEY' }
+          : {}),
+      })
+      if (selected.source === 'oauth_session') {
+        const gatewayURL = cliOAuthGatewayURL(environment, flags.baseUrl)
+        const accessToken = await accessTokenForCommand(credentialStore(), authProvider())
+        setCommandOption(action, 'baseUrl', gatewayURL)
+        setCredentialOptions(action, null, null, accessToken)
+      } else if (selected.transport === 'bearer') {
+        setCredentialOptions(action, null, null, selected.value)
+      } else {
+        setCredentialOptions(action, null, selected.value, null)
+      }
+    } catch (error) {
+      setCredentialOptions(action, null, null, rejectedCredential(error))
+    }
+  })
+}
+
+// Workload keys and OAuth tokens share the OpenAPI BearerAuth transport but
+// remain separate credential sources. Keep the workload-facing flag stable
+// even when Scalar emits only the shared bearer option.
+const installWorkloadAPIKeyOption = (program: Command): void => {
+  const visit = (command: Command): void => {
+    if (!command.options.some((option) => option.long === '--api-key')) {
+      command.option('--api-key <value>', 'Use a workload API key for this command')
+    }
+    for (const child of command.commands) visit(child)
+  }
+  visit(program)
+}
+
+export const cliOAuthGatewayURL = (
+  environment: Readonly<Record<string, string | undefined>>,
+  flagValue?: string,
+): string => {
+  const issuer = new URL(createClerkAuthProvider(cliAuthConfiguration(environment)).issuer)
+  const developmentIssuer = issuer.hostname.endsWith('.clerk.accounts.dev')
+  if (!developmentIssuer) throw new CredentialStorageError('environment_mismatch')
+  const raw = flagValue ?? environment.DEDALUS_BASE_URL ?? developmentGatewayURL
+  const gatewayURL = validHTTPSBaseURL(raw)
+  if (new URL(gatewayURL).pathname !== '/dcs') {
+    throw new CredentialStorageError('environment_mismatch')
+  }
+  if (gatewayURL !== developmentGatewayURL) {
+    throw new CredentialStorageError('environment_mismatch')
+  }
+  return gatewayURL
+}
+
+const validHTTPSBaseURL = (raw: string): string => {
+  try {
+    if (raw !== raw.trim()) throw new CredentialStorageError('environment_mismatch')
+    const value = new URL(raw)
+    if (
+      value.protocol !== 'https:' ||
+      value.username ||
+      value.password ||
+      value.search ||
+      value.hash ||
+      !/^\/(?:[A-Za-z0-9._~-]+(?:\/[A-Za-z0-9._~-]+)*)?\/?$/u.test(value.pathname)
+    ) {
+      throw new CredentialStorageError('environment_mismatch')
+    }
+    const path = value.pathname === '/' ? '' : value.pathname.replace(/\/$/u, '')
+    return value.origin + path
+  } catch (error) {
+    if (error instanceof CredentialStorageError) throw error
+    throw new CredentialStorageError('environment_mismatch', { cause: error })
+  }
+}
+
+const intendedCredential = (
+  flags: { readonly apiKey?: string; readonly bearerAuth?: string; readonly xApiKey?: string },
+  environment: Readonly<Record<string, string | undefined>>,
+): SelectedCredential => {
+  if (flags.apiKey !== undefined || flags.xApiKey !== undefined || flags.bearerAuth !== undefined) {
+    return { source: 'flag' }
+  }
+  if (
+    environment.DEDALUS_API_KEY !== undefined ||
+    environment.DEDALUS_X_API_KEY !== undefined ||
+    environment.DEDALUS_BEARER_AUTH !== undefined
+  ) {
+    return { source: 'environment' }
+  }
+  return { source: 'oauth_session' }
+}
+
+const setCredentialOptions = (
+  action: Command,
+  apiKey: unknown,
+  xApiKey: unknown,
+  bearerAuth: unknown,
+): void => {
+  let current: Command | null = action
+  while (current) {
+    current.setOptionValueWithSource('apiKey', apiKey, 'cli')
+    current.setOptionValueWithSource('xApiKey', xApiKey, 'cli')
+    current.setOptionValueWithSource('bearerAuth', bearerAuth, 'cli')
+    current = current.parent
+  }
+}
+
+const setCommandOption = (action: Command, name: string, value: unknown): void => {
+  let current: Command | null = action
+  while (current) {
+    current.setOptionValueWithSource(name, value, 'cli')
+    current = current.parent
+  }
+}
+
+const rejectedCredential = (error: unknown): (() => never) => () => { throw error }
+
 export const formatDedalusError = (
   error: unknown,
   command: Command,
