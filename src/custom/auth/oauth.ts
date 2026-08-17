@@ -75,10 +75,6 @@ type UserInfo = {
   readonly organizationName?: string
 }
 
-type UserInfoResponse = UserInfo & {
-  readonly responseStatus: number
-}
-
 export const clerkPKCEChallenge = (verifier: string): string =>
   createHash('sha256').update(verifier, 'ascii').digest('base64url')
 
@@ -306,7 +302,6 @@ export const beginClerkOAuth = async (
           'token_exchange_failed',
         )
         const user = await fetchUserInfo(issuer, tokens.accessToken, request)
-        validateAccessTokenClaims(tokens.accessToken, issuer.origin, user, user.responseStatus)
         return sessionFrom(issuer.origin, clientId, tokens, user)
       })
       return completion
@@ -400,7 +395,7 @@ const fetchUserInfo = async (
   issuer: URL,
   accessToken: string,
   request: typeof globalThis.fetch,
-): Promise<UserInfoResponse> => {
+): Promise<UserInfo> => {
   let response: Response
   try {
     response = await request(new URL('/oauth/userinfo', issuer), {
@@ -424,7 +419,6 @@ const fetchUserInfo = async (
     userId,
     organizationId,
     ...(organizationName ? { organizationName } : {}),
-    responseStatus: response.status,
   }
 }
 
