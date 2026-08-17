@@ -410,3 +410,242 @@ test('invariant opaque access tokens with dot separators remain supported', asyn
 
   assert.equal((await attempt.complete()).accessToken, 'opaque.access.token')
 })
+test('invariant OAuth token exchange never follows redirects', async () => {
+  let forwardedRequests = 0
+  const receiver = createServer((_request, response) => {
+    forwardedRequests += 1
+    response.end(JSON.stringify(tokenResponse()))
+  })
+  await listen(receiver)
+  const tokenEndpoint = createServer((_request, response) => {
+    response.writeHead(307, { Location: serverURL(receiver) })
+    response.end()
+  })
+  await listen(tokenEndpoint)
+
+  try {
+    const attempt = await beginClerkOAuth(
+      { issuer: 'https://clerk.example.com', clientId: 'client_cli' },
+      { fetch: (_input, init) => fetch(serverURL(tokenEndpoint), init) },
+    )
+    const authorization = new URL(attempt.authorizationURL)
+    await finishAuthorization(attempt, authorization)
+
+    await assert.rejects(attempt.complete(), (error) =>
+      error instanceof ClerkOAuthError && error.code === 'oauth_error' && error.status === 307)
+    assert.equal(forwardedRequests, 0)
+  } finally {
+    await close(tokenEndpoint)
+    await close(receiver)
+  }
+})
+
+test('invariant OAuth userinfo requests never forward access tokens across redirects', async () => {
+  let forwardedRequests = 0
+  const receiver = createServer((_request, response) => {
+    forwardedRequests += 1
+    response.end(JSON.stringify(userInfo()))
+  })
+  await listen(receiver)
+  const userinfoEndpoint = createServer((_request, response) => {
+    response.writeHead(307, { Location: serverURL(receiver) })
+    response.end()
+  })
+  await listen(userinfoEndpoint)
+
+  try {
+    const attempt = await beginClerkOAuth(
+      { issuer: 'https://clerk.example.com', clientId: 'client_cli' },
+      { fetch: (input, init) => String(input).endsWith('/oauth/token')
+        ? Promise.resolve(Response.json(tokenResponse()))
+        : fetch(serverURL(userinfoEndpoint), init) },
+    )
+    const authorization = new URL(attempt.authorizationURL)
+    await finishAuthorization(attempt, authorization)
+
+    await assert.rejects(attempt.complete(), (error) =>
+      error instanceof ClerkOAuthError && error.code === 'oauth_error' && error.status === 307)
+    assert.equal(forwardedRequests, 0)
+  } finally {
+    await close(userinfoEndpoint)
+    await close(receiver)
+  }
+})
+
+test('invariant Clerk refresh preserves verified metadata without a userinfo request', async () => {
+  const requests = []
+  const provider = createClerkAuthProvider(
+    { issuer: 'https://clerk.example.com', clientId: 'client_cli' },
+    {
+      now: () => 10_000,
+      fetch: async (input, init) => {
+        requests.push({ input: String(input), init })
+        if (String(input).endsWith('/oauth/token')) {
+          return Response.json(tokenResponse({
+            access_token: 'refreshed-access-token',
+            refresh_token: undefined,
+            expires_in: 3_600,
+          }))
+        }
+        throw new Error('userinfo is unavailable')
+      },
+    },
+  )
+  const refreshed = await provider.refresh({
+    version: 1,
+    issuer: 'https://clerk.example.com',
+    clientId: 'client_cli',
+    accessToken: 'expired-access-token',
+    accessTokenExpiresAt: 1,
+    refreshToken: 'original-refresh-token',
+    userId: 'user_cli',
+    organizationId: 'org_cli',
+    organizationName: 'Dedalus Labs',
+    grantedScopes: ['offline_access', 'user:org:read'],
+    providerSessionId: 'session_cli',
+  })
+
+  assert.equal(refreshed.accessToken, 'refreshed-access-token')
+  assert.equal(refreshed.refreshToken, 'original-refresh-token')
+  assert.equal(refreshed.accessTokenExpiresAt, 3_610_000)
+  assert.equal(refreshed.organizationName, 'Dedalus Labs')
+  assert.equal(refreshed.providerSessionId, 'session_cli')
+  assert.equal(requests.length, 1)
+  const body = new URLSearchParams(requests[0].init.body)
+  assert.equal(body.get('grant_type'), 'refresh_token')
+  assert.equal(body.get('refresh_token'), 'original-refresh-token')
+  assert.equal(requests[0].init.redirect, 'manual')
+})
+
+test('invariant a malformed returned refresh token cannot masquerade as omission', async () => {
+  const authProvider = createClerkAuthProvider(
+    { issuer: 'https://clerk.example.com', clientId: 'client_cli' },
+    { fetch: async () => Response.json(tokenResponse({ refresh_token: 'malformed token' })) },
+  )
+
+  await assert.rejects(authProvider.refresh({
+    version: 1,
+    issuer: 'https://clerk.example.com',
+    clientId: 'client_cli',
+    accessToken: 'expired-access-token',
+    accessTokenExpiresAt: 1,
+    refreshToken: 'original-refresh-token',
+    userId: 'user_cli',
+    organizationId: 'org_cli',
+    grantedScopes: ['offline_access', 'user:org:read'],
+  }), (error) =>
+    error instanceof ClerkOAuthError && error.code === 'invalid_token_response' && error.status === 200)
+})
+
+test('invariant Clerk revocation sends only the refresh token and reports confirmation', async () => {
+  let request
+  const provider = createClerkAuthProvider(
+    { issuer: 'https://clerk.example.com', clientId: 'client_cli' },
+    { fetch: async (input, init) => {
+      request = { input: String(input), init }
+      return new Response(null, { status: 200 })
+    } },
+  )
+  const confirmed = await provider.revoke({
+    version: 1,
+    issuer: 'https://clerk.example.com',
+    clientId: 'client_cli',
+    accessToken: 'access-token-must-not-be-sent',
+    accessTokenExpiresAt: 2_000_000_000_000,
+    refreshToken: 'refresh-token',
+    userId: 'user_cli',
+    organizationId: 'org_cli',
+    grantedScopes: ['offline_access', 'user:org:read'],
+  })
+
+  assert.equal(confirmed, true)
+  assert.equal(request.input, 'https://clerk.example.com/oauth/token/revoke')
+  assert.equal(request.input.includes('refresh-token'), false)
+  assert.equal(new URLSearchParams(request.init.body).get('token'), 'refresh-token')
+  assert.equal(request.init.redirect, 'manual')
+})
+
+test('invariant Clerk revocation never forwards a refresh token across redirects', async () => {
+  let forwardedRequests = 0
+  const receiver = createServer((_request, response) => {
+    forwardedRequests += 1
+    response.writeHead(200)
+    response.end()
+  })
+  await listen(receiver)
+  const revocationEndpoint = createServer((_request, response) => {
+    response.writeHead(307, { Location: serverURL(receiver) })
+    response.end()
+  })
+  await listen(revocationEndpoint)
+
+  try {
+    const authProvider = createClerkAuthProvider(
+      { issuer: 'https://clerk.example.com', clientId: 'client_cli' },
+      { fetch: (_input, init) => fetch(serverURL(revocationEndpoint), init) },
+    )
+    assert.equal(await authProvider.revoke({
+      version: 1,
+      issuer: 'https://clerk.example.com',
+      clientId: 'client_cli',
+      accessToken: 'access-token',
+      accessTokenExpiresAt: 2_000_000_000_000,
+      refreshToken: 'refresh-token',
+      userId: 'user_cli',
+      organizationId: 'org_cli',
+      grantedScopes: ['offline_access', 'user:org:read'],
+    }), false)
+    assert.equal(forwardedRequests, 0)
+  } finally {
+    await close(revocationEndpoint)
+    await close(receiver)
+  }
+})
+
+test('invariant OAuth configuration rejects non-TLS Clerk issuers and handoffs', async () => {
+  await assert.rejects(
+    beginClerkOAuth({ issuer: 'http://clerk.example.com', clientId: 'client_cli' }),
+    (error) => error instanceof ClerkOAuthError && error.code === 'invalid_configuration',
+  )
+  await assert.rejects(
+    beginClerkOAuth({
+      issuer: 'https://clerk.example.com',
+      clientId: 'client_cli',
+      signInURL: 'http://dev.dedaluslabs.ai/cli/sign-in',
+    }),
+    (error) => error instanceof ClerkOAuthError && error.code === 'invalid_configuration',
+  )
+  await assert.rejects(
+    beginClerkOAuth({ issuer: ' https://clerk.example.com', clientId: 'client_cli' }),
+    (error) => error instanceof ClerkOAuthError && error.code === 'invalid_configuration',
+  )
+  await assert.rejects(
+    beginClerkOAuth({ issuer: 'https://clerk.example.com', clientId: ' client_cli' }),
+    (error) => error instanceof ClerkOAuthError && error.code === 'invalid_configuration',
+  )
+})
+
+test('invariant OAuth configuration permits a loopback website handoff in development', async () => {
+  const attempt = await beginClerkOAuth({
+    issuer: 'https://clerk.example.com',
+    clientId: 'client_cli',
+    signInURL: 'http://localhost:3000/cli/sign-in',
+  })
+  assert.equal(new URL(attempt.authorizationURL).origin, 'http://localhost:3000')
+  await attempt.cancel()
+})
+
+const listen = (server) => new Promise((resolve, reject) => {
+  server.once('error', reject)
+  server.listen(0, '127.0.0.1', resolve)
+})
+
+const close = (server) => new Promise((resolve, reject) => {
+  server.close((error) => error ? reject(error) : resolve())
+})
+
+const serverURL = (server) => {
+  const address = server.address()
+  assert.ok(address && typeof address !== 'string')
+  return `http://127.0.0.1:${address.port}`
+}
