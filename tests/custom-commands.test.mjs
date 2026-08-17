@@ -61,6 +61,9 @@ const resourceProgram = (onAction) => new Command()
   .option('--format <value>', '', 'auto')
   .option('--format-error <value>', '', 'auto')
   .addCommand(new Command('machines')
+    .option('--api-key <value>')
+    .option('--x-api-key <value>')
+    .option('--bearer-auth <value>')
     .option('--format <value>')
     .option('--format-error <value>')
     .action((...args) => onAction(args.at(-1))))
@@ -86,16 +89,21 @@ test('invariant V1 configuration contains only the Clerk public-client bundle', 
     signInURL: 'https://dev.dedaluslabs.ai/cli/sign-in',
   })
   assert.deepEqual(cliAuthConfiguration({
-    DEDALUS_CLERK_ISSUER: 'https://clerk.example.test',
-    DEDALUS_CLERK_CLIENT_ID: 'client_test',
-    DEDALUS_SIGN_IN_URL: 'https://website.example.test/cli/sign-in',
+    DEDALUS_SIGN_IN_URL: 'http://127.0.0.1:3000/cli/sign-in',
   }), {
-    issuer: 'https://clerk.example.test',
-    clientId: 'client_test',
-    signInURL: 'https://website.example.test/cli/sign-in',
+    issuer: 'https://neat-gator-21.clerk.accounts.dev',
+    clientId: 'W27FJtdP5VDfKMTv',
+    signInURL: 'http://127.0.0.1:3000/cli/sign-in',
   })
   assert.throws(
-    () => cliAuthConfiguration({ DEDALUS_CLERK_ISSUER: 'https://clerk.example.test' }),
+    () => cliAuthConfiguration({ DEDALUS_SIGN_IN_URL: 'https://website.example.test/cli/sign-in' }),
+    (error) => error instanceof AuthProviderError && error.code === 'invalid_configuration',
+  )
+  assert.throws(
+    () => cliAuthConfiguration({
+      DEDALUS_CLERK_ISSUER: 'https://clerk.example.test',
+      DEDALUS_CLERK_CLIENT_ID: 'client_test',
+    }),
     (error) => error instanceof AuthProviderError && error.code === 'invalid_configuration',
   )
 })
@@ -134,14 +142,14 @@ test('invariant an unconfigured Clerk issuer cannot select a gateway', () => {
       ...environment,
       DEDALUS_BASE_URL: 'https://admin.example.test/dcs/',
     }),
-    (error) => error instanceof Error && error.code === 'environment_mismatch',
+    (error) => error instanceof AuthProviderError && error.code === 'invalid_configuration',
   )
   assert.throws(
     () => cliOAuthGatewayURL({
       ...environment,
       DEDALUS_BASE_URL: 'https://admin.example.test/dcs/v1',
     }),
-    (error) => error instanceof Error && error.code === 'environment_mismatch',
+    (error) => error instanceof AuthProviderError && error.code === 'invalid_configuration',
   )
 })
 
@@ -161,22 +169,16 @@ test('invariant generated commands receive stored OAuth only as bearerAuth', asy
   assert.equal(options.baseUrl, 'https://dev.admin.api.dedaluslabs.ai/dcs')
 })
 
-test('invariant the workload API-key flag survives a shared BearerAuth generation', async () => {
+test('invariant workload API keys use the generated API-key transport', async () => {
   let options
-  const program = new Command()
-    .option('--base-url <value>')
-    .option('--x-api-key <value>')
-    .option('--bearer-auth <value>')
-    .addCommand(new Command('machines').action((...args) => {
-      options = args.at(-1).optsWithGlobals()
-    }))
+  const program = resourceProgram((command) => { options = command.optsWithGlobals() })
   addDedalusCommands(program, { environment: {} })
 
   await program.parseAsync(['node', 'dedalus', 'machines', '--api-key', 'workload-key'])
 
-  assert.equal(options.apiKey, null)
+  assert.equal(options.apiKey, 'workload-key')
   assert.equal(options.xApiKey, null)
-  assert.equal(options.bearerAuth, 'workload-key')
+  assert.equal(options.bearerAuth, null)
 })
 
 test('invariant JSON convenience remains in Dedalus-owned custom code', async () => {
@@ -224,9 +226,9 @@ test('invariant workload flags do not construct a lower-priority credential stor
 
   await program.parseAsync(['node', 'dedalus', '--api-key', 'flag-key', 'machines'])
 
-  assert.equal(options.apiKey, null)
+  assert.equal(options.apiKey, 'flag-key')
   assert.equal(options.xApiKey, null)
-  assert.equal(options.bearerAuth, 'flag-key')
+  assert.equal(options.bearerAuth, null)
 })
 
 test('invariant workload environment keys do not construct a lower-priority credential store', async () => {
@@ -241,9 +243,9 @@ test('invariant workload environment keys do not construct a lower-priority cred
 
   await program.parseAsync(['node', 'dedalus', 'machines'])
 
-  assert.equal(options.apiKey, null)
+  assert.equal(options.apiKey, 'environment-key')
   assert.equal(options.xApiKey, null)
-  assert.equal(options.bearerAuth, 'environment-key')
+  assert.equal(options.bearerAuth, null)
 })
 
 test('invariant a workload flag ignores a lower-priority Bearer environment override', async () => {
@@ -260,8 +262,8 @@ test('invariant a workload flag ignores a lower-priority Bearer environment over
 
   await program.parseAsync(['node', 'dedalus', '--api-key', 'flag-key', 'machines'])
 
-  assert.equal(options.apiKey, null)
-  assert.equal(options.bearerAuth, 'flag-key')
+  assert.equal(options.apiKey, 'flag-key')
+  assert.equal(options.bearerAuth, null)
   assert.equal(reads, 0)
 })
 
@@ -452,4 +454,3 @@ test('invariant root JSON override also applies to auth commands', async () => {
 
   assert.deepEqual(JSON.parse(output), { status: 'not_logged_in', credential_source: 'none' })
 })
-
