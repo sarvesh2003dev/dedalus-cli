@@ -154,10 +154,7 @@ export const defaultCredentialStore = (
 ): CredentialStore => {
   const environment = options.environment ?? process.env
   const platform = options.platform ?? process.platform
-  const configuredBackend = environment.DEDALUS_CREDENTIAL_STORE
-  const backend = configuredBackend === undefined
-    ? platformCredentialBackend(platform, environment)
-    : validBackend(configuredBackend)
+  const backend = platformCredentialBackend(platform, environment)
 
   if (backend === 'keyring') return keyringCredentialStore()
   if (platform === 'win32') throw new CredentialStorageError('invalid_configuration')
@@ -338,11 +335,6 @@ const platformCredentialBackend = (
   if (platform === 'darwin' || platform === 'win32') return 'keyring'
   if (platform === 'linux' && environment.DBUS_SESSION_BUS_ADDRESS) return 'keyring'
   return 'file'
-}
-
-const validBackend = (value: string): CredentialStore['backend'] => {
-  if (value === 'file' || value === 'keyring') return value
-  throw new CredentialStorageError('invalid_configuration')
 }
 
 const defaultCredentialPath = (
