@@ -38,6 +38,12 @@ npm install -g dedalus-cli
 dedalus [resource] [command] [flags]
 ```
 
+Scalar owns generated SDK and resource-command files. Dedalus-specific behavior
+lives under `src/custom` and joins the generated command tree through
+`addDedalusCommands` in `src/commands/index.ts`. Keep authentication, stored
+credentials, and other handwritten commands behind that boundary so Scalar can
+regenerate the API surface without replacing them.
+
 The examples in the following sections assume a `client` configured as shown above.
 
 See the [API reference](./api.md) for every available operation.
@@ -74,19 +80,43 @@ man dedalus-<resource>-<command>
 
 ## Authentication
 
-Pass credentials to the generated client constructor. Environment variables are read automatically when supported by the target runtime.
+Sign in through the browser with Clerk Authorization Code and S256 Proof Key
+for Code Exchange (PKCE). The command-line interface (CLI) stores Clerk's OAuth
+2.0 token set in protected local storage. The canonical service-account
+application programming interface (API) key stays on the server:
+
+```sh
+dedalus auth login
+dedalus auth status
+dedalus auth status --offline
+dedalus auth logout
+```
+
+Normal resource commands resolve one credential in this order: an explicit
+API-key flag, its environment variable, then the stored browser-login
+OAuth session. Once selected, a rejected credential fails in place and never
+falls back to another source. `--offline` reads only stored status metadata.
+Add `--json` to auth or generated resource commands for structured output that
+excludes secret values.
+
+The checked-in V1 authentication bundle targets the development Clerk
+application and `https://dev.admin.api.dedaluslabs.ai/dcs`. OAuth sessions are
+accepted only for a Clerk development issuer and are sent only to that exact
+gateway. Production needs its own checked-in issuer, client, and gateway bundle;
+arbitrary HTTPS gateway overrides fail closed.
+
+Workload credentials may also be supplied explicitly:
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--api-key` | `string \| provider` | - | API key authentication using Bearer token Defaults to DEDALUS_API_KEY. |
-| `--x-api-key` | `string \| provider` | - | API key authentication using X-API-Key header Defaults to DEDALUS_X_API_KEY. |
-| `--bearer-auth` | `string \| provider` | - | Dedalus API key in Authorization: Bearer <key>. Defaults to DEDALUS_BEARER_AUTH. |
+| `--api-key` | `string \| provider` | - | API key authentication using Bearer token. Defaults to `DEDALUS_API_KEY`. |
+| `--x-api-key` | `string \| provider` | - | API key authentication using X-API-Key header. Defaults to `DEDALUS_X_API_KEY`. |
+| `--bearer-auth` | `string \| provider` | - | Reserved for the stored OAuth adapter; direct CLI and environment overrides are rejected. |
 
 Declared schemes:
 
 - `ApiKeyAuth` API key in header `x-api-key`
 - `BearerAuth` bearer token
-- `Bearer` bearer token
 
 <br />
 
