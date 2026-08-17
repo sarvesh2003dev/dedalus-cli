@@ -82,6 +82,378 @@ type UserInfoResponse = UserInfo & {
 export const clerkPKCEChallenge = (verifier: string): string =>
   createHash('sha256').update(verifier, 'ascii').digest('base64url')
 
+export const createClerkAuthProvider = (
+  options: ClerkOAuthOptions,
+  dependencies: ClerkOAuthDependencies = {},
+): AuthProvider => {
+  const issuer = validIssuer(options.issuer).origin
+  const clientId = validClientId(options.clientId)
+  const request = dependencies.fetch ?? globalThis.fetch
+  const now = dependencies.now ?? Date.now
+
+  return {
+    issuer,
+    clientId,
+    login: async () => {
+      const attempt = await beginClerkOAuth({ ...options, issuer, clientId }, dependencies)
+      try {
+        const openBrowser = dependencies.openBrowser ?? defaultOpenBrowser
+        await openBrowser(attempt.authorizationURL)
+      } catch (error) {
+        await attempt.cancel()
+        throw new ClerkOAuthError('browser_open_failed', { cause: error })
+      }
+      return attempt.complete()
+    },
+    refresh: async (session) => {
+      requireProviderSession(session, issuer, clientId)
+      const tokens = await requestTokenSet(
+        new URL(issuer),
+        new URLSearchParams({
+          grant_type: 'refresh_token',
+          client_id: clientId,
+          refresh_token: session.refreshToken,
+        }),
+        request,
+        now,
+        session.refreshToken,
+        'refresh_failed',
+      )
+      return {
+        ...session,
+        accessToken: tokens.accessToken,
+        accessTokenExpiresAt: tokens.accessTokenExpiresAt,
+        refreshToken: tokens.refreshToken,
+        grantedScopes: tokens.grantedScopes,
+      }
+    },
+    revoke: async (session) => {
+      requireProviderSession(session, issuer, clientId)
+      let response: Response
+      try {
+        response = await request(new URL('/oauth/token/revoke', issuer), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            client_id: clientId,
+            token: session.refreshToken,
+            token_type_hint: 'refresh_token',
+          }),
+          redirect: 'manual',
+          signal: AbortSignal.timeout(requestTimeoutMs),
+        })
+      } catch {
+        return false
+      }
+      return response.ok
+    },
+  }
+}
+
+export const beginClerkOAuth = async (
+  options: ClerkOAuthOptions,
+  dependencies: ClerkOAuthDependencies = {},
+): Promise<ClerkOAuthAttempt> => {
+  const issuer = validIssuer(options.issuer)
+  const clientId = validClientId(options.clientId)
+  const signInURL = options.signInURL === undefined ? undefined : validSignInURL(options.signInURL)
+  const timeoutMs = options.timeoutMs ?? defaultLoginTimeoutMs
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new ClerkOAuthError('invalid_configuration')
+  }
+
+  const randomBytes = dependencies.randomBytes ?? nodeRandomBytes
+  const verifier = randomValue(randomBytes)
+  const state = randomValue(randomBytes)
+  const callback = deferred<OAuthCallback>()
+  // The browser may return before complete() attaches its handler.
+  void callback.promise.catch(() => undefined)
+
+  let settled = false
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const server = createServer((request, response) => {
+    const finish = (status: number, message: string, onFinished: () => void): void => {
+      finishCallback(server, response, status, message, onFinished, () => {
+        callback.reject(new ClerkOAuthError('callback_response_failed'))
+      })
+    }
+    let url: URL
+    try {
+      url = new URL(request.url ?? '/', 'http://127.0.0.1')
+    } catch {
+      response.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' })
+      response.end('Invalid request')
+      return
+    }
+    if (request.method !== 'GET' || url.pathname !== callbackPath) {
+      response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' })
+      response.end('Not found')
+      return
+    }
+    if (settled) {
+      response.writeHead(410, { 'Content-Type': 'text/plain; charset=utf-8' })
+      response.end('Login attempt is already complete')
+      return
+    }
+
+    const returnedStates = url.searchParams.getAll('state')
+    if (returnedStates.length !== 1 || !equalSecret(returnedStates[0] ?? '', state)) {
+      writeCallbackResponse(response, 400, 'Login response could not be verified')
+      return
+    }
+
+    const returnedIssuers = url.searchParams.getAll('iss')
+    if (returnedIssuers.length !== 1 || returnedIssuers[0] !== issuer.origin) {
+      settled = true
+      if (timer !== undefined) clearTimeout(timer)
+      finish(400, 'Login response could not be verified', () => {
+        callback.reject(new ClerkOAuthError('issuer_mismatch'))
+      })
+      return
+    }
+
+    settled = true
+    if (timer !== undefined) clearTimeout(timer)
+
+    const providerErrors = url.searchParams.getAll('error')
+    const codes = url.searchParams.getAll('code')
+    if (providerErrors.length > 0 && codes.length > 0) {
+      finish(400, 'Login response was incomplete', () => {
+        callback.reject(new ClerkOAuthError('invalid_callback'))
+      })
+      return
+    }
+    if (providerErrors.length === 1) {
+      finish(400, 'Login was not completed', () => {
+        callback.reject(new ClerkOAuthError(
+          oauthErrorCode(providerErrors[0] ?? ''),
+          { stage: 'provider' },
+        ))
+      })
+      return
+    }
+
+    const code = opaqueValue(codes[0], maxAuthorizationCodeLength)
+    if (providerErrors.length > 1 || codes.length !== 1 || !code) {
+      finish(400, 'Login response was incomplete', () => {
+        callback.reject(new ClerkOAuthError('invalid_callback'))
+      })
+      return
+    }
+
+    finish(200, 'Dedalus CLI login received. You can close this window.', () => {
+      callback.resolve({ code })
+    })
+  })
+
+  try {
+    await listenOnLoopback(server)
+  } catch (error) {
+    throw new ClerkOAuthError('callback_unavailable', { cause: error })
+  }
+
+  const address = server.address()
+  if (!address || typeof address === 'string') {
+    await closeServer(server)
+    throw new ClerkOAuthError('callback_unavailable')
+  }
+  const redirectURI = `http://127.0.0.1:${address.port}${callbackPath}`
+  const authorizationURL = new URL('/oauth/authorize', issuer)
+  authorizationURL.search = new URLSearchParams({
+    response_type: 'code',
+    client_id: clientId,
+    redirect_uri: redirectURI,
+    code_challenge: clerkPKCEChallenge(verifier),
+    code_challenge_method: 'S256',
+    state,
+    scope: oauthScopes.join(' '),
+  }).toString()
+  if (authorizationURL.toString().length > maxAuthorizationURLLength) {
+    await closeServer(server)
+    throw new ClerkOAuthError('invalid_configuration')
+  }
+  const browserURL = signInURL === undefined
+    ? authorizationURL
+    : wrappedAuthorizationURL(signInURL, authorizationURL)
+
+  timer = setTimeout(() => {
+    if (settled) return
+    settled = true
+    callback.reject(new ClerkOAuthError('login_timeout'))
+    void closeServer(server).catch(() => undefined)
+  }, timeoutMs)
+  timer.unref()
+
+  let completion: Promise<OAuthSession> | undefined
+  return {
+    authorizationURL: browserURL.toString(),
+    redirectURI,
+    complete: () => {
+      completion ??= callback.promise.then(async ({ code }) => {
+        const request = dependencies.fetch ?? globalThis.fetch
+        const tokens = await requestTokenSet(
+          issuer,
+          new URLSearchParams({
+            grant_type: 'authorization_code',
+            client_id: clientId,
+            code,
+            redirect_uri: redirectURI,
+            code_verifier: verifier,
+          }),
+          request,
+          dependencies.now ?? Date.now,
+          undefined,
+          'token_exchange_failed',
+        )
+        const user = await fetchUserInfo(issuer, tokens.accessToken, request)
+        validateAccessTokenClaims(tokens.accessToken, issuer.origin, user, user.responseStatus)
+        return sessionFrom(issuer.origin, clientId, tokens, user)
+      })
+      return completion
+    },
+    cancel: async () => {
+      if (!settled) {
+        settled = true
+        callback.reject(new ClerkOAuthError('login_cancelled'))
+      }
+      if (timer !== undefined) clearTimeout(timer)
+      await closeServer(server)
+    },
+  }
+}
+
+const requestTokenSet = async (
+  issuer: URL,
+  body: URLSearchParams,
+  request: typeof globalThis.fetch,
+  now: () => number,
+  previousRefreshToken: string | undefined,
+  networkErrorCode: string,
+): Promise<TokenSet> => {
+  let response: Response
+  try {
+    response = await request(new URL('/oauth/token', issuer), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+      redirect: 'manual',
+      signal: AbortSignal.timeout(requestTimeoutMs),
+    })
+  } catch (error) {
+    throw new ClerkOAuthError(networkErrorCode, { cause: error, stage: 'network' })
+  }
+
+  const payload = await jsonObject(response)
+  if (!response.ok) throw oauthHTTPError(response.status, payload)
+
+  const accessToken = opaqueValue(payload.access_token, maxOAuthTokenLength)
+  const returnedRefreshToken = opaqueValue(payload.refresh_token, maxOAuthTokenLength)
+  if (payload.refresh_token !== undefined && !returnedRefreshToken) {
+    throw new ClerkOAuthError('invalid_token_response', { status: response.status })
+  }
+  const refreshToken = returnedRefreshToken || previousRefreshToken
+  const tokenType = opaqueValue(payload.token_type, 32).toLowerCase()
+  const expiresIn = payload.expires_in
+  if (
+    !accessToken ||
+    !refreshToken ||
+    tokenType !== 'bearer' ||
+    typeof expiresIn !== 'number' ||
+    !Number.isSafeInteger(expiresIn) ||
+    expiresIn <= 0
+  ) {
+    throw new ClerkOAuthError('invalid_token_response', { status: response.status })
+  }
+
+  if (payload.scope !== undefined && typeof payload.scope !== 'string') {
+    throw new ClerkOAuthError('invalid_scope', { status: response.status })
+  }
+  const grantedScopes = payload.scope === undefined
+    ? [...oauthScopes]
+    : uniqueScopes(payload.scope, response.status)
+  if (
+    grantedScopes.length !== oauthScopes.length ||
+    oauthScopes.some((scope) => !grantedScopes.includes(scope))
+  ) {
+    throw new ClerkOAuthError('invalid_scope', { status: response.status })
+  }
+  const issuedAt = now()
+  const accessTokenExpiresAt = issuedAt + expiresIn * 1000
+  if (
+    !Number.isSafeInteger(issuedAt) ||
+    issuedAt < 0 ||
+    !Number.isSafeInteger(accessTokenExpiresAt) ||
+    accessTokenExpiresAt <= issuedAt ||
+    Number.isNaN(new Date(accessTokenExpiresAt).getTime())
+  ) {
+    throw new ClerkOAuthError('invalid_token_response', { status: response.status })
+  }
+  return {
+    accessToken,
+    accessTokenExpiresAt,
+    refreshToken,
+    grantedScopes,
+  }
+}
+
+const fetchUserInfo = async (
+  issuer: URL,
+  accessToken: string,
+  request: typeof globalThis.fetch,
+): Promise<UserInfoResponse> => {
+  let response: Response
+  try {
+    response = await request(new URL('/oauth/userinfo', issuer), {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(requestTimeoutMs),
+    })
+  } catch (error) {
+    throw new ClerkOAuthError('userinfo_failed', { cause: error, stage: 'network' })
+  }
+  const payload = await jsonObject(response)
+  if (!response.ok) throw oauthHTTPError(response.status, payload)
+
+  const userId = opaqueValue(payload.sub, maxOAuthIdentifierLength)
+  const organizationId = opaqueValue(payload.org_id, maxOAuthIdentifierLength)
+  const organizationName = displayValue(payload.org_name)
+  if (!userId || !organizationId) {
+    throw new ClerkOAuthError('invalid_userinfo_response', { status: response.status })
+  }
+  return {
+    userId,
+    organizationId,
+    ...(organizationName ? { organizationName } : {}),
+    responseStatus: response.status,
+  }
+}
+
+const sessionFrom = (
+  issuer: string,
+  clientId: string,
+  tokens: TokenSet,
+  user: UserInfo,
+  providerSessionId?: string,
+): OAuthSession => ({
+  version: 1,
+  issuer,
+  clientId,
+  accessToken: tokens.accessToken,
+  accessTokenExpiresAt: tokens.accessTokenExpiresAt,
+  refreshToken: tokens.refreshToken,
+  userId: user.userId,
+  organizationId: user.organizationId,
+  ...(user.organizationName === undefined ? {} : { organizationName: user.organizationName }),
+  grantedScopes: tokens.grantedScopes,
+  ...(providerSessionId === undefined ? {} : { providerSessionId }),
+})
+
+const requireProviderSession = (session: OAuthSession, issuer: string, clientId: string): void => {
+  if (session.issuer !== issuer || session.clientId !== clientId) {
+    throw new ClerkOAuthError('session_provider_mismatch')
+  }
+}
+
 const validIssuer = (raw: string): URL => {
   try {
     if (raw.length > maxOAuthDisplayLength || raw !== raw.trim()) {
