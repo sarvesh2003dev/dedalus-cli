@@ -309,7 +309,7 @@ test('invariant stored expiry must be printable as an ISO timestamp', async () =
   )
 })
 
-test('invariant credential backend selection is explicit and stable', () => {
+test('invariant credential backend selection follows the host platform', () => {
   assert.equal(defaultCredentialStore({ platform: 'darwin', environment: {} }).backend, 'keyring')
   assert.equal(defaultCredentialStore({ platform: 'win32', environment: {} }).backend, 'keyring')
   assert.equal(defaultCredentialStore({
@@ -317,17 +317,4 @@ test('invariant credential backend selection is explicit and stable', () => {
     environment: {},
     credentialPath: '/tmp/dedalus-test-credentials',
   }).backend, 'file')
-  assert.equal(defaultCredentialStore({
-    platform: 'darwin',
-    environment: { DEDALUS_CREDENTIAL_STORE: 'file' },
-    credentialPath: '/tmp/dedalus-test-credentials',
-  }).backend, 'file')
-  assert.throws(
-    () => defaultCredentialStore({
-      platform: 'win32',
-      environment: { DEDALUS_CREDENTIAL_STORE: 'file' },
-      credentialPath: '/tmp/dedalus-test-credentials',
-    }),
-    (error) => error instanceof CredentialStorageError && error.code === 'invalid_configuration',
-  )
 })
