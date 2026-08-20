@@ -5,44 +5,35 @@
  * callback. It returns a provider-neutral session for storage and refresh.
  */
 
-import { createHash, randomBytes as nodeRandomBytes, timingSafeEqual } from 'node:crypto'
-import { createServer, type Server } from 'node:http'
+import { createHash, randomBytes as nodeRandomBytes } from 'node:crypto'
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 
 import {
-  AuthProviderError,
-  type AuthProvider,
-  type AuthProviderErrorStage,
-  type OAuthSession,
-} from './types.js'
+  clerkOAuthScopes,
+  ClerkOAuthError,
+  fetchUserInfo,
+  oauthErrorCode,
+  opaqueValue,
+  requestTokenSet,
+  type TokenSet,
+  type UserInfo,
+} from './oauth-http.js'
+import { closeServer, deferred, equalSecret, listenOnLoopback, type Deferred } from './oauth-loopback.js'
+import type { AuthProvider, OAuthSession } from './types.js'
 
-const callbackPath = '/callback'
+export {
+  ClerkOAuthError,
+  type ClerkOAuthErrorCode,
+  type ClerkOAuthErrorStage,
+} from './oauth-http.js'
+
 const defaultLoginTimeoutMs = 10 * 60 * 1000
+const callbackPath = '/callback'
 const maxAuthorizationCodeLength = 8 * 1024
 const maxAuthorizationURLLength = 4 * 1024
 const maxOAuthDisplayLength = 4 * 1024
 const maxOAuthIdentifierLength = 1024
-const maxOAuthResponseBytes = 512 * 1024
-const maxOAuthScopeCount = 32
-const maxOAuthScopeLength = 256
-const maxOAuthTokenLength = 128 * 1024
 const requestTimeoutMs = 30 * 1000
-const oauthScopes = ['offline_access', 'user:org:read'] as const
-
-export type ClerkOAuthErrorCode = string
-export type ClerkOAuthErrorStage = AuthProviderErrorStage
-
-export class ClerkOAuthError extends AuthProviderError {
-  constructor(
-    code: ClerkOAuthErrorCode,
-    options: ErrorOptions & {
-      readonly stage?: ClerkOAuthErrorStage
-      readonly status?: number
-    } = {},
-  ) {
-    super(code, options)
-    this.name = 'ClerkOAuthError'
-  }
-}
 
 export type ClerkOAuthOptions = {
   readonly issuer: string
@@ -65,21 +56,26 @@ export type ClerkOAuthAttempt = {
   readonly cancel: () => Promise<void>
 }
 
-type OAuthCallback = {
-  readonly code: string
+type OAuthConfiguration = {
+  readonly clientId: string
+  readonly issuer: URL
+  readonly signInURL?: URL
+  readonly timeoutMs: number
 }
 
-type TokenSet = {
-  readonly accessToken: string
-  readonly accessTokenExpiresAt: number
-  readonly refreshToken: string
-  readonly grantedScopes: readonly string[]
+type CallbackState = {
+  readonly result: Deferred<string>
+  readonly issuer: string
+  readonly state: string
+  settled: boolean
+  timer?: ReturnType<typeof setTimeout>
 }
 
-type UserInfo = {
-  readonly userId: string
-  readonly organizationId: string
-  readonly organizationName?: string
+type OAuthCallbackListener = {
+  readonly redirectURI: string
+  readonly result: Promise<string>
+  readonly cancel: () => Promise<void>
+  readonly startTimeout: (timeoutMs: number) => void
 }
 
 export const clerkPKCEChallenge = (verifier: string): string =>
@@ -102,7 +98,7 @@ export const createClerkAuthProvider = (
       try {
         const openBrowser = dependencies.openBrowser ?? defaultOpenBrowser
         await openBrowser(attempt.authorizationURL)
-      } catch (error) {
+      } catch (error: unknown) {
         await attempt.cancel()
         throw new ClerkOAuthError('browser_open_failed', { cause: error })
       }
@@ -157,276 +153,245 @@ export const beginClerkOAuth = async (
   options: ClerkOAuthOptions,
   dependencies: ClerkOAuthDependencies = {},
 ): Promise<ClerkOAuthAttempt> => {
-  const issuer = validIssuer(options.issuer)
-  const clientId = validClientId(options.clientId)
-  const signInURL = options.signInURL === undefined ? undefined : validSignInURL(options.signInURL)
+  const configuration = oauthConfigurationFrom(options)
+  const randomBytes = dependencies.randomBytes ?? nodeRandomBytes
+  const verifier = randomValue(randomBytes)
+  const state = randomValue(randomBytes)
+  const callback = await listenForOAuthCallback(configuration.issuer.origin, state)
+  try {
+    const browserURL = authorizationBrowserURL(configuration, callback.redirectURI, verifier, state)
+    callback.startTimeout(configuration.timeoutMs)
+    return clerkOAuthAttempt(browserURL, verifier, callback, configuration, dependencies)
+  } catch (error: unknown) {
+    await callback.cancel()
+    throw error
+  }
+}
+
+const oauthConfigurationFrom = (options: ClerkOAuthOptions): OAuthConfiguration => {
   const timeoutMs = options.timeoutMs ?? defaultLoginTimeoutMs
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
     throw new ClerkOAuthError('invalid_configuration')
   }
-
-  const randomBytes = dependencies.randomBytes ?? nodeRandomBytes
-  const verifier = randomValue(randomBytes)
-  const state = randomValue(randomBytes)
-  const callback = deferred<OAuthCallback>()
-  // The browser may return before complete() attaches its handler.
-  void callback.promise.catch(() => undefined)
-
-  let settled = false
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const server = createServer((request, response) => {
-    const finish = (status: number, message: string, onFinished: () => void): void => {
-      finishCallback(server, response, status, message, onFinished, () => {
-        callback.reject(new ClerkOAuthError('callback_response_failed'))
-      })
-    }
-    let url: URL
-    try {
-      url = new URL(request.url ?? '/', 'http://127.0.0.1')
-    } catch {
-      response.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' })
-      response.end('Invalid request')
-      return
-    }
-    if (request.method !== 'GET' || url.pathname !== callbackPath) {
-      response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' })
-      response.end('Not found')
-      return
-    }
-    if (settled) {
-      response.writeHead(410, { 'Content-Type': 'text/plain; charset=utf-8' })
-      response.end('Login attempt is already complete')
-      return
-    }
-
-    const returnedStates = url.searchParams.getAll('state')
-    if (returnedStates.length !== 1 || !equalSecret(returnedStates[0] ?? '', state)) {
-      writeCallbackResponse(response, 400, 'Login response could not be verified')
-      return
-    }
-
-    const returnedIssuers = url.searchParams.getAll('iss')
-    if (returnedIssuers.length !== 1 || returnedIssuers[0] !== issuer.origin) {
-      settled = true
-      if (timer !== undefined) clearTimeout(timer)
-      finish(400, 'Login response could not be verified', () => {
-        callback.reject(new ClerkOAuthError('issuer_mismatch'))
-      })
-      return
-    }
-
-    settled = true
-    if (timer !== undefined) clearTimeout(timer)
-
-    const providerErrors = url.searchParams.getAll('error')
-    const codes = url.searchParams.getAll('code')
-    if (providerErrors.length > 0 && codes.length > 0) {
-      finish(400, 'Login response was incomplete', () => {
-        callback.reject(new ClerkOAuthError('invalid_callback'))
-      })
-      return
-    }
-    if (providerErrors.length === 1) {
-      finish(400, 'Login was not completed', () => {
-        callback.reject(new ClerkOAuthError(
-          oauthErrorCode(providerErrors[0] ?? ''),
-          { stage: 'provider' },
-        ))
-      })
-      return
-    }
-
-    const code = opaqueValue(codes[0], maxAuthorizationCodeLength)
-    if (providerErrors.length > 1 || codes.length !== 1 || !code) {
-      finish(400, 'Login response was incomplete', () => {
-        callback.reject(new ClerkOAuthError('invalid_callback'))
-      })
-      return
-    }
-
-    finish(200, 'Dedalus CLI login received. You can close this window.', () => {
-      callback.resolve({ code })
-    })
-  })
-
-  try {
-    await listenOnLoopback(server)
-  } catch (error) {
-    throw new ClerkOAuthError('callback_unavailable', { cause: error })
+  return {
+    issuer: validIssuer(options.issuer),
+    clientId: validClientId(options.clientId),
+    ...(options.signInURL === undefined ? {} : { signInURL: validSignInURL(options.signInURL) }),
+    timeoutMs,
   }
+}
 
+const listenForOAuthCallback = async (
+  issuer: string,
+  expectedState: string,
+): Promise<OAuthCallbackListener> => {
+  const result = deferred<string>()
+  // The browser may return before complete() observes the result.
+  void result.promise.catch(() => undefined)
+  const state: CallbackState = { result, issuer, state: expectedState, settled: false }
+  const server = createServer()
+  server.on('request', (request, response) => handleOAuthCallback(server, state, request, response))
+  await listenOnLoopback(server)
   const address = server.address()
   if (!address || typeof address === 'string') {
     await closeServer(server)
     throw new ClerkOAuthError('callback_unavailable')
   }
-  const redirectURI = `http://127.0.0.1:${address.port}${callbackPath}`
-  const authorizationURL = new URL('/oauth/authorize', issuer)
+  return {
+    redirectURI: `http://127.0.0.1:${address.port}${callbackPath}`,
+    result: result.promise,
+    cancel: async () => {
+      if (!state.settled) {
+        state.settled = true
+        result.reject(new ClerkOAuthError('login_cancelled'))
+      }
+      if (state.timer !== undefined) clearTimeout(state.timer)
+      await closeServer(server)
+    },
+    startTimeout: (timeoutMs) => startLoginTimeout(server, state, timeoutMs),
+  }
+}
+
+const handleOAuthCallback = (
+  server: Server,
+  state: CallbackState,
+  request: IncomingMessage,
+  response: ServerResponse,
+): void => {
+  const url = callbackURL(request, response)
+  if (!url) return
+  if (request.method !== 'GET' || url.pathname !== callbackPath) {
+    writeCallbackResponse(response, 404, 'Not found')
+    return
+  }
+  if (state.settled) {
+    writeCallbackResponse(response, 410, 'Login attempt is already complete')
+    return
+  }
+  const returnedStates = url.searchParams.getAll('state')
+  if (returnedStates.length !== 1 || !equalSecret(returnedStates[0] ?? '', state.state)) {
+    writeCallbackResponse(response, 400, 'Login response could not be verified')
+    return
+  }
+  const returnedIssuers = url.searchParams.getAll('iss')
+  if (returnedIssuers.length !== 1 || returnedIssuers[0] !== state.issuer) {
+    settleCallback(state)
+    finishOAuthCallback(server, state, response, 'Login response could not be verified', new ClerkOAuthError('issuer_mismatch'))
+    return
+  }
+  settleCallback(state)
+  const providerErrors = url.searchParams.getAll('error')
+  const codes = url.searchParams.getAll('code')
+  if (providerErrors.length > 0 && codes.length > 0) {
+    finishOAuthCallback(server, state, response, 'Login response was incomplete', new ClerkOAuthError('invalid_callback'))
+    return
+  }
+  if (providerErrors.length === 1) {
+    const error = new ClerkOAuthError(oauthErrorCode(providerErrors[0] ?? ''), { stage: 'provider' })
+    finishOAuthCallback(server, state, response, 'Login was not completed', error)
+    return
+  }
+  const code = opaqueValue(codes[0], maxAuthorizationCodeLength)
+  if (providerErrors.length > 1 || codes.length !== 1 || !code) {
+    finishOAuthCallback(server, state, response, 'Login response was incomplete', new ClerkOAuthError('invalid_callback'))
+    return
+  }
+  finishOAuthCallback(server, state, response, 'Dedalus CLI login received. You can close this window.', code)
+}
+
+const finishOAuthCallback = (
+  server: Server,
+  state: CallbackState,
+  response: ServerResponse,
+  message: string,
+  result: string | ClerkOAuthError,
+): void => {
+  let complete = false
+  const settleResponse = (aborted: boolean): void => {
+    if (complete) return
+    complete = true
+    response.off('finish', onFinish)
+    response.off('close', onClose)
+    response.off('error', onError)
+    if (aborted) state.result.reject(new ClerkOAuthError('callback_response_failed'))
+    else if (result instanceof ClerkOAuthError) state.result.reject(result)
+    else state.result.resolve(result)
+    server.close()
+  }
+  const onFinish = (): void => settleResponse(false)
+  const onClose = (): void => settleResponse(true)
+  const onError = (): void => settleResponse(true)
+  response.once('finish', onFinish)
+  response.once('close', onClose)
+  response.once('error', onError)
+  writeCallbackResponse(response, result instanceof ClerkOAuthError ? 400 : 200, message)
+}
+
+const callbackURL = (request: IncomingMessage, response: ServerResponse): URL | undefined => {
+  try {
+    return new URL(request.url ?? '/', 'http://127.0.0.1')
+  } catch {
+    writeCallbackResponse(response, 400, 'Invalid request')
+    return undefined
+  }
+}
+
+const writeCallbackResponse = (response: ServerResponse, status: number, message: string): void => {
+  response.writeHead(status, {
+    'Cache-Control': 'no-store',
+    'Content-Type': 'text/plain; charset=utf-8',
+  })
+  response.end(message)
+}
+
+const settleCallback = (state: CallbackState): void => {
+  state.settled = true
+  if (state.timer !== undefined) clearTimeout(state.timer)
+}
+
+const startLoginTimeout = (server: Server, state: CallbackState, timeoutMs: number): void => {
+  state.timer = setTimeout(() => {
+    if (state.settled) return
+    state.settled = true
+    state.result.reject(new ClerkOAuthError('login_timeout'))
+    void closeServer(server).catch(() => undefined)
+  }, timeoutMs)
+  state.timer.unref()
+}
+
+const authorizationBrowserURL = (
+  configuration: OAuthConfiguration,
+  redirectURI: string,
+  verifier: string,
+  state: string,
+): URL => {
+  const authorizationURL = new URL('/oauth/authorize', configuration.issuer)
   authorizationURL.search = new URLSearchParams({
     response_type: 'code',
-    client_id: clientId,
+    client_id: configuration.clientId,
     redirect_uri: redirectURI,
     code_challenge: clerkPKCEChallenge(verifier),
     code_challenge_method: 'S256',
     state,
-    scope: oauthScopes.join(' '),
+    scope: clerkOAuthScopes.join(' '),
   }).toString()
   if (authorizationURL.toString().length > maxAuthorizationURLLength) {
-    await closeServer(server)
     throw new ClerkOAuthError('invalid_configuration')
   }
-  const browserURL = signInURL === undefined
+  return configuration.signInURL === undefined
     ? authorizationURL
-    : wrappedAuthorizationURL(signInURL, authorizationURL)
+    : wrappedAuthorizationURL(configuration.signInURL, authorizationURL)
+}
 
-  timer = setTimeout(() => {
-    if (settled) return
-    settled = true
-    callback.reject(new ClerkOAuthError('login_timeout'))
-    void closeServer(server).catch(() => undefined)
-  }, timeoutMs)
-  timer.unref()
-
+const clerkOAuthAttempt = (
+  authorizationURL: URL,
+  verifier: string,
+  callback: OAuthCallbackListener,
+  configuration: OAuthConfiguration,
+  dependencies: ClerkOAuthDependencies,
+): ClerkOAuthAttempt => {
   let completion: Promise<OAuthSession> | undefined
   return {
-    authorizationURL: browserURL.toString(),
-    redirectURI,
+    authorizationURL: authorizationURL.toString(),
+    redirectURI: callback.redirectURI,
     complete: () => {
-      completion ??= callback.promise.then(async ({ code }) => {
-        const request = dependencies.fetch ?? globalThis.fetch
-        const tokens = await requestTokenSet(
-          issuer,
-          new URLSearchParams({
-            grant_type: 'authorization_code',
-            client_id: clientId,
-            code,
-            redirect_uri: redirectURI,
-            code_verifier: verifier,
-          }),
-          request,
-          dependencies.now ?? Date.now,
-          undefined,
-          'token_exchange_failed',
-        )
-        const user = await fetchUserInfo(issuer, tokens.accessToken, request)
-        return sessionFrom(issuer.origin, clientId, tokens, user)
-      })
+      completion ??= callback.result.then((code) => completeOAuth(
+        code,
+        callback.redirectURI,
+        verifier,
+        configuration,
+        dependencies,
+      ))
       return completion
     },
-    cancel: async () => {
-      if (!settled) {
-        settled = true
-        callback.reject(new ClerkOAuthError('login_cancelled'))
-      }
-      if (timer !== undefined) clearTimeout(timer)
-      await closeServer(server)
-    },
+    cancel: callback.cancel,
   }
 }
 
-const requestTokenSet = async (
-  issuer: URL,
-  body: URLSearchParams,
-  request: typeof globalThis.fetch,
-  now: () => number,
-  previousRefreshToken: string | undefined,
-  networkErrorCode: string,
-): Promise<TokenSet> => {
-  let response: Response
-  try {
-    response = await request(new URL('/oauth/token', issuer), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body,
-      redirect: 'manual',
-      signal: AbortSignal.timeout(requestTimeoutMs),
-    })
-  } catch (error) {
-    throw new ClerkOAuthError(networkErrorCode, { cause: error, stage: 'network' })
-  }
-
-  const payload = await jsonObject(response)
-  if (!response.ok) throw oauthHTTPError(response.status, payload)
-
-  const accessToken = opaqueValue(payload.access_token, maxOAuthTokenLength)
-  const returnedRefreshToken = opaqueValue(payload.refresh_token, maxOAuthTokenLength)
-  if (payload.refresh_token !== undefined && !returnedRefreshToken) {
-    throw new ClerkOAuthError('invalid_token_response', { status: response.status })
-  }
-  const refreshToken = returnedRefreshToken || previousRefreshToken
-  const tokenType = opaqueValue(payload.token_type, 32).toLowerCase()
-  const expiresIn = payload.expires_in
-  if (
-    !accessToken ||
-    !refreshToken ||
-    tokenType !== 'bearer' ||
-    typeof expiresIn !== 'number' ||
-    !Number.isSafeInteger(expiresIn) ||
-    expiresIn <= 0
-  ) {
-    throw new ClerkOAuthError('invalid_token_response', { status: response.status })
-  }
-
-  if (payload.scope !== undefined && typeof payload.scope !== 'string') {
-    throw new ClerkOAuthError('invalid_scope', { status: response.status })
-  }
-  const grantedScopes = payload.scope === undefined
-    ? [...oauthScopes]
-    : uniqueScopes(payload.scope, response.status)
-  if (
-    grantedScopes.length !== oauthScopes.length ||
-    oauthScopes.some((scope) => !grantedScopes.includes(scope))
-  ) {
-    throw new ClerkOAuthError('invalid_scope', { status: response.status })
-  }
-  const issuedAt = now()
-  const accessTokenExpiresAt = issuedAt + expiresIn * 1000
-  if (
-    !Number.isSafeInteger(issuedAt) ||
-    issuedAt < 0 ||
-    !Number.isSafeInteger(accessTokenExpiresAt) ||
-    accessTokenExpiresAt <= issuedAt ||
-    Number.isNaN(new Date(accessTokenExpiresAt).getTime())
-  ) {
-    throw new ClerkOAuthError('invalid_token_response', { status: response.status })
-  }
-  return {
-    accessToken,
-    accessTokenExpiresAt,
-    refreshToken,
-    grantedScopes,
-  }
-}
-
-const fetchUserInfo = async (
-  issuer: URL,
-  accessToken: string,
-  request: typeof globalThis.fetch,
-): Promise<UserInfo> => {
-  let response: Response
-  try {
-    response = await request(new URL('/oauth/userinfo', issuer), {
-      headers: { Authorization: `Bearer ${accessToken}` },
-      redirect: 'manual',
-      signal: AbortSignal.timeout(requestTimeoutMs),
-    })
-  } catch (error) {
-    throw new ClerkOAuthError('userinfo_failed', { cause: error, stage: 'network' })
-  }
-  const payload = await jsonObject(response)
-  if (!response.ok) throw oauthHTTPError(response.status, payload)
-
-  const userId = opaqueValue(payload.sub, maxOAuthIdentifierLength)
-  const organizationId = opaqueValue(payload.org_id, maxOAuthIdentifierLength)
-  const organizationName = displayValue(payload.org_name)
-  if (!userId || !organizationId) {
-    throw new ClerkOAuthError('invalid_userinfo_response', { status: response.status })
-  }
-  return {
-    userId,
-    organizationId,
-    ...(organizationName ? { organizationName } : {}),
-  }
+const completeOAuth = async (
+  code: string,
+  redirectURI: string,
+  verifier: string,
+  configuration: OAuthConfiguration,
+  dependencies: ClerkOAuthDependencies,
+): Promise<OAuthSession> => {
+  const request = dependencies.fetch ?? globalThis.fetch
+  const tokens = await requestTokenSet(
+    configuration.issuer,
+    new URLSearchParams({
+      grant_type: 'authorization_code',
+      client_id: configuration.clientId,
+      code,
+      redirect_uri: redirectURI,
+      code_verifier: verifier,
+    }),
+    request,
+    dependencies.now ?? Date.now,
+    undefined,
+    'token_exchange_failed',
+  )
+  const user = await fetchUserInfo(configuration.issuer, tokens.accessToken, request)
+  return sessionFrom(configuration.issuer.origin, configuration.clientId, tokens, user)
 }
 
 const sessionFrom = (
@@ -472,7 +437,7 @@ const validIssuer = (raw: string): URL => {
       throw new ClerkOAuthError('invalid_configuration')
     }
     return issuer
-  } catch (error) {
+  } catch (error: unknown) {
     if (error instanceof ClerkOAuthError) throw error
     throw new ClerkOAuthError('invalid_configuration', { cause: error })
   }
@@ -497,7 +462,7 @@ const validSignInURL = (raw: string): URL => {
       throw new ClerkOAuthError('invalid_configuration')
     }
     return signInURL
-  } catch (error) {
+  } catch (error: unknown) {
     if (error instanceof ClerkOAuthError) throw error
     throw new ClerkOAuthError('invalid_configuration', { cause: error })
   }
@@ -521,188 +486,7 @@ const randomValue = (randomBytes: (size: number) => Uint8Array): string => {
   return Buffer.from(value).toString('base64url')
 }
 
-const equalSecret = (actual: string, expected: string): boolean => {
-  const actualBytes = Buffer.from(actual)
-  const expectedBytes = Buffer.from(expected)
-  return actualBytes.length === expectedBytes.length && timingSafeEqual(actualBytes, expectedBytes)
-}
-
-const listenOnLoopback = (server: Server): Promise<void> =>
-  new Promise((resolve, reject) => {
-    const onError = (error: Error) => reject(error)
-    server.once('error', onError)
-    server.listen(0, '127.0.0.1', () => {
-      server.off('error', onError)
-      resolve()
-    })
-  })
-
-const closeServer = (server: Server): Promise<void> =>
-  new Promise((resolve, reject) => {
-    if (!server.listening) {
-      resolve()
-      return
-    }
-    server.close((error) => error ? reject(error) : resolve())
-  })
-
-const writeCallbackResponse = (
-  response: import('node:http').ServerResponse,
-  status: number,
-  message: string,
-): void => {
-  response.writeHead(status, {
-    'Cache-Control': 'no-store',
-    'Content-Type': 'text/plain; charset=utf-8',
-  })
-  response.end(message)
-}
-
-const finishCallback = (
-  server: Server,
-  response: import('node:http').ServerResponse,
-  status: number,
-  message: string,
-  onFinished: () => void,
-  onAborted: () => void,
-): void => {
-  let complete = false
-  const settle = (action: () => void): void => {
-    if (complete) return
-    complete = true
-    response.off('finish', onFinish)
-    response.off('close', onClose)
-    response.off('error', onError)
-    action()
-    server.close()
-  }
-  const onFinish = (): void => settle(onFinished)
-  const onClose = (): void => settle(onAborted)
-  const onError = (): void => settle(onAborted)
-  response.once('finish', onFinish)
-  response.once('close', onClose)
-  response.once('error', onError)
-  writeCallbackResponse(response, status, message)
-}
-
-const jsonObject = async (response: Response): Promise<Record<string, unknown>> => {
-  try {
-    const raw = await boundedResponseText(response, maxOAuthResponseBytes)
-    if (raw === undefined) return {}
-    const payload: unknown = JSON.parse(raw)
-    return payload !== null && typeof payload === 'object' && !Array.isArray(payload)
-      ? payload as Record<string, unknown>
-      : {}
-  } catch {
-    return {}
-  }
-}
-
-const boundedResponseText = async (
-  response: Response,
-  maximumBytes: number,
-): Promise<string | undefined> => {
-  const contentLength = response.headers.get('content-length')
-  if (contentLength !== null) {
-    const parsed = Number(contentLength)
-    if (Number.isFinite(parsed) && parsed > maximumBytes) {
-      await response.body?.cancel().catch(() => undefined)
-      return undefined
-    }
-  }
-  if (!response.body) return ''
-
-  const reader = response.body.getReader()
-  const chunks: Uint8Array[] = []
-  let total = 0
-  try {
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      total += value.byteLength
-      if (total > maximumBytes) {
-        await reader.cancel().catch(() => undefined)
-        return undefined
-      }
-      chunks.push(value)
-    }
-  } finally {
-    reader.releaseLock()
-  }
-
-  const bytes = new Uint8Array(total)
-  let offset = 0
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset)
-    offset += chunk.byteLength
-  }
-  return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
-}
-
-const oauthHTTPError = (status: number, payload: Readonly<Record<string, unknown>>): ClerkOAuthError =>
-  new ClerkOAuthError(
-    typeof payload.error === 'string' ? oauthErrorCode(payload.error) : 'oauth_error',
-    { stage: 'provider', status },
-  )
-
-const oauthErrorCode = (value: string): ClerkOAuthErrorCode => {
-  if (!value || value.length > 256) return 'oauth_error'
-  for (const character of value) {
-    const code = character.charCodeAt(0)
-    if (!((code >= 0x20 && code <= 0x21) || (code >= 0x23 && code <= 0x5b) || (code >= 0x5d && code <= 0x7e))) {
-      return 'oauth_error'
-    }
-  }
-  return value
-}
-
-const opaqueValue = (value: unknown, maximumLength: number = maxOAuthTokenLength): string => {
-  if (typeof value !== 'string' || value.length === 0 || value.length > maximumLength) return ''
-  for (const character of value) {
-    const code = character.charCodeAt(0)
-    if (code < 0x21 || code > 0x7e) return ''
-  }
-  return value
-}
-
-const displayValue = (value: unknown): string =>
-  typeof value === 'string' &&
-  value.length > 0 &&
-  value.length <= maxOAuthDisplayLength &&
-  value === value.trim() &&
-  !/[\u0000-\u001f\u007f-\u009f]/u.test(value)
-    ? value
-    : ''
-
-const uniqueScopes = (value: string, responseStatus: number): readonly string[] => {
-  if (value.length > maxOAuthScopeCount * (maxOAuthScopeLength + 1)) {
-    throw new ClerkOAuthError('invalid_scope', { status: responseStatus })
-  }
-  const scopes = [...new Set(value.split(/\s+/).filter(Boolean))]
-  if (
-    scopes.length > maxOAuthScopeCount ||
-    scopes.some((scope) => !opaqueValue(scope, maxOAuthScopeLength))
-  ) {
-    throw new ClerkOAuthError('invalid_scope', { status: responseStatus })
-  }
-  return scopes
-}
-
 const defaultOpenBrowser = async (url: string): Promise<void> => {
   const { default: open } = await import('open')
   await open(url)
-}
-
-const deferred = <T>(): {
-  readonly promise: Promise<T>
-  readonly resolve: (value: T) => void
-  readonly reject: (error: unknown) => void
-} => {
-  let resolve!: (value: T) => void
-  let reject!: (error: unknown) => void
-  const promise = new Promise<T>((onResolve, onReject) => {
-    resolve = onResolve
-    reject = onReject
-  })
-  return { promise, resolve, reject }
 }
