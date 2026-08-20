@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
+import { execFile } from 'node:child_process'
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { promisify } from 'node:util'
 
 import {
   CredentialStorageError,
@@ -11,6 +13,8 @@ import {
   keyringCredentialStore,
   resolveCredential,
 } from '../dist/esm/custom/auth/credentials.js'
+
+const run = promisify(execFile)
 
 const session = (overrides = {}) => ({
   version: 1,
@@ -213,6 +217,22 @@ test('invariant filesystem storage never follows a credential symlink', async (c
     (error) => error instanceof CredentialStorageError && error.code === 'insecure_permissions',
   )
   assert.deepEqual(await fileCredentialStore(targetPath).read(), session())
+})
+
+test('invariant a non-regular credential path cannot block reads', async (context) => {
+  if (process.platform === 'win32') return context.skip('FIFOs are POSIX-only')
+  const root = await mkdtemp(join(tmpdir(), 'dedalus-credentials-'))
+  context.after(() => rm(root, { recursive: true, force: true }))
+  const directory = join(root, 'config')
+  const credentialPath = join(directory, 'credentials')
+  await mkdir(directory, { mode: 0o700 })
+  await run('mkfifo', [credentialPath])
+  await chmod(credentialPath, 0o600)
+
+  await assert.rejects(
+    fileCredentialStore(credentialPath).read(),
+    (error) => error instanceof CredentialStorageError && error.code === 'insecure_permissions',
+  )
 })
 
 test('invariant filesystem removal rejects an unsafe parent directory', async (context) => {

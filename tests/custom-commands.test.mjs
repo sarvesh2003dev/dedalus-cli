@@ -82,6 +82,31 @@ test('invariant generated commands cannot shadow Dedalus commands', () => {
   assert.throws(() => addDedalusCommands(program), /Scalar generated the reserved 'auth' command/u)
 })
 
+test('invariant nested generated resource names cannot bypass credential injection', async () => {
+  for (const nestedName of ['auth', 'completion']) {
+    let options
+    const program = new Command()
+      .option('--base-url <value>')
+      .option('--api-key <value>')
+      .option('--x-api-key <value>')
+      .option('--bearer-auth <value>')
+      .addCommand(new Command('resources').addCommand(
+        new Command(nestedName).addCommand(
+          new Command('get').action((...args) => { options = args.at(-1).optsWithGlobals() }),
+        ),
+      ))
+    addDedalusCommands(program, {
+      environment: { DEDALUS_BASE_URL: 'https://dev.admin.api.dedaluslabs.ai/dcs' },
+      credentialStore: () => store(),
+      authProvider: () => provider(),
+    })
+
+    await program.parseAsync(['node', 'dedalus', 'resources', nestedName, 'get'])
+    assert.equal(options.bearerAuth, 'oauth-access-token')
+    assert.equal(options.baseUrl, 'https://dev.admin.api.dedaluslabs.ai/dcs')
+  }
+})
+
 test('invariant V1 configuration contains only the Clerk public-client bundle', () => {
   assert.deepEqual(cliAuthConfiguration({}), {
     issuer: 'https://neat-gator-21.clerk.accounts.dev',

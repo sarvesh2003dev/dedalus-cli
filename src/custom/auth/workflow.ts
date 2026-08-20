@@ -28,6 +28,7 @@ export class CLIAuthWorkflowError extends Error {
 export type LoginDependencies = {
   readonly provider: AuthProvider
   readonly store: CredentialStore
+  readonly now?: () => number
 }
 
 type AuthProviderFactory = () => AuthProvider
@@ -48,7 +49,7 @@ export type LogoutResult =
 export const login = async (dependencies: LoginDependencies): Promise<LoginResult> =>
   dependencies.store.withLifecycleLock(async () => {
     const existing = await dependencies.store.read()
-    if (existing) {
+    if (existing && existing.accessTokenExpiresAt > (dependencies.now ?? Date.now)() + refreshSkewMs) {
       requireProviderBinding(existing, dependencies.provider)
       return { status: 'already_signed_in', session: oauthSessionMetadata(existing) }
     }

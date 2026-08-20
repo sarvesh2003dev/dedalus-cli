@@ -30,6 +30,8 @@
   ],
   "scripts": {
     "build": "node scripts/prepare-build.mjs && tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && node scripts/finalize-build.mjs",
+    "pack:check": "node scripts/check-package.mjs",
+    "prepack": "npm run build",
     "test": "npm run build && node --test tests/*.test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.cjs.json --noEmit"
   },

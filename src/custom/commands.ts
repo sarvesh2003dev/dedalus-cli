@@ -97,9 +97,17 @@ export const addDedalusCommands = (
   ))
   const writeOutput = options.writeOutput ?? ((value) => process.stdout.write(value))
   const writeError = options.writeError ?? ((value) => process.stderr.write(value))
-  installJSONConvenience(program)
-  program.addCommand(createAuthCommand({ environment, operations, writeError, writeOutput }))
-  installCredentialInjection(program, environment, credentialStore, authProvider)
+  const authCommand = createAuthCommand({ environment, operations, writeError, writeOutput })
+  installJSONConvenience(program, new Set([authCommand]))
+  const completionCommand = program.commands.find((command) => command.name() === completionCommandName)
+  program.addCommand(authCommand)
+  installCredentialInjection({
+    program,
+    environment,
+    credentialStore,
+    authProvider,
+    exemptCommands: new Set([authCommand, ...(completionCommand ? [completionCommand] : [])]),
+  })
   return program
 }
 
@@ -161,7 +169,10 @@ const createAuthCommand = ({
   return auth
 }
 
-const installJSONConvenience = (program: Command): void => {
+const installJSONConvenience = (
+  program: Command,
+  exemptCommands: ReadonlySet<Command>,
+): void => {
   if (!program.options.some((option) => option.long === '--json')) {
     program.option('--json', 'Print structured JSON output')
   }
@@ -177,7 +188,7 @@ const installJSONConvenience = (program: Command): void => {
   for (const command of program.commands) visit(command)
 
   program.hook('preAction', async (_root, action) => {
-    if (belongsTo(action, authCommandName) || !jsonRequested(action)) return
+    if ([...exemptCommands].some((command) => belongsTo(action, command)) || !jsonRequested(action)) return
     setCommandOption(action, 'format', 'json')
     setCommandOption(action, 'formatError', 'json')
   })
@@ -245,14 +256,23 @@ const cliSignInURL = (raw: string): string => {
   }
 }
 
-const installCredentialInjection = (
-  program: Command,
-  environment: Readonly<Record<string, string | undefined>>,
-  credentialStore: () => CredentialStore,
-  authProvider: () => AuthProvider,
-): void => {
+type CredentialInjectionDependencies = {
+  readonly program: Command
+  readonly environment: Readonly<Record<string, string | undefined>>
+  readonly credentialStore: () => CredentialStore
+  readonly authProvider: () => AuthProvider
+  readonly exemptCommands: ReadonlySet<Command>
+}
+
+const installCredentialInjection = ({
+  program,
+  environment,
+  credentialStore,
+  authProvider,
+  exemptCommands,
+}: CredentialInjectionDependencies): void => {
   program.hook('preAction', async (_root, action) => {
-    if (belongsTo(action, authCommandName) || belongsTo(action, completionCommandName)) return
+    if ([...exemptCommands].some((command) => belongsTo(action, command))) return
     const flags = action.optsWithGlobals<{
       readonly apiKey?: string
       readonly baseUrl?: string
@@ -384,10 +404,10 @@ const setCommandOption = (action: Command, name: string, value: unknown): void =
 
 const rejectedCredential = (error: unknown): (() => never) => () => { throw error }
 
-const belongsTo = (command: Command, parentName: string): boolean => {
+const belongsTo = (command: Command, ancestor: Command): boolean => {
   let current: Command | null = command
   while (current) {
-    if (current.name() === parentName) return true
+    if (current === ancestor) return true
     current = current.parent
   }
   return false

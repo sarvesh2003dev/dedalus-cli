@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
 import { createServer, request as httpRequest } from 'node:http'
+import { connect } from 'node:net'
+import { once } from 'node:events'
 import test from 'node:test'
 
 import {
@@ -110,6 +112,26 @@ test('invariant the optional website handoff keeps OAuth state out of HTTP query
   assert.equal(authorization.origin + authorization.pathname, 'https://clerk.example.com/oauth/authorize')
   assert.equal(authorization.searchParams.get('redirect_uri'), attempt.redirectURI)
   await attempt.cancel()
+})
+
+test('invariant a partial loopback request cannot stall OAuth cancellation', async () => {
+  const attempt = await beginClerkOAuth({
+    issuer: 'https://clerk.example.com',
+    clientId: 'client_cli',
+  })
+  const callback = new URL(attempt.redirectURI)
+  const socket = connect(Number(callback.port), callback.hostname)
+  await once(socket, 'connect')
+  socket.write('GET /callback HTTP/1.1\r\nHost: 127.0.0.1')
+  socket.on('error', () => undefined)
+  const closed = new Promise((resolve) => socket.once('close', resolve))
+
+  await attempt.cancel()
+  await closed
+  await assert.rejects(
+    attempt.complete(),
+    (error) => error instanceof ClerkOAuthError && error.code === 'login_cancelled',
+  )
 })
 
 test('invariant the CLI never opens an authorization request the website will reject', async () => {

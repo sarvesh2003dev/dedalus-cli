@@ -209,7 +209,9 @@ const keyringLifecycleLockPath = (): string => join(homedir(), '.dedalus-cli-cre
 const readCredentialFile = async (directory: string, credentialPath: string): Promise<OAuthSession | null> => {
   try {
     await requirePrivateDirectory(directory, false)
-    const handle = await open(credentialPath, constants.O_RDONLY | noFollowFlag())
+    // O_NONBLOCK prevents a same-user FIFO replacement from hanging before
+    // descriptor metadata can reject the non-regular path.
+    const handle = await open(credentialPath, constants.O_RDONLY | constants.O_NONBLOCK | noFollowFlag())
     try {
       const metadata = await handle.stat()
       requirePrivateFile(metadata)

@@ -43,6 +43,12 @@ export const listenOnLoopback = async (server: Server): Promise<void> => {
 }
 
 export const closeServer = (server: Server): Promise<void> => new Promise((resolve, reject) => {
-  if (!server.listening) return resolve()
+  if (!server.listening) {
+    server.closeAllConnections()
+    return resolve()
+  }
   server.close((error) => error ? reject(error) : resolve())
+  // close() stops new connections but waits for active sockets. Destroy them
+  // after closing so a partial local request cannot stall cancellation.
+  server.closeAllConnections()
 })

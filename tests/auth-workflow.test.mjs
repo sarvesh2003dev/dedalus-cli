@@ -68,6 +68,26 @@ test('invariant an existing OAuth login performs no provider work', async () => 
   assert.deepEqual(await existing.read(), session())
 })
 
+test('invariant login replaces an expired OAuth session', async () => {
+  const events = []
+  const expired = store(session({
+    accessToken: 'expired-access-token',
+    accessTokenExpiresAt: 1_000,
+    refreshToken: 'expired-refresh-token',
+  }))
+  const fresh = session({ accessToken: 'fresh-access-token', refreshToken: 'fresh-refresh-token' })
+
+  const result = await login({
+    provider: provider({ login: async () => { events.push('login'); return fresh } }),
+    store: expired,
+    now: () => 2_000,
+  })
+
+  assert.equal(result.status, 'logged_in')
+  assert.deepEqual(events, ['login'])
+  assert.deepEqual(await expired.read(), fresh)
+})
+
 test('invariant login durably stores the Clerk token set without returning secrets', async () => {
   const events = []
   const empty = store()
