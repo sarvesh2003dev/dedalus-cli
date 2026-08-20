@@ -30,9 +30,11 @@
   ],
   "scripts": {
     "build": "node scripts/prepare-build.mjs && tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && node scripts/finalize-build.mjs",
+    "generate:commands": "node scripts/generate-cli-operations.mjs",
+    "generate:check": "node scripts/generate-cli-operations.mjs --check",
     "pack:check": "node scripts/check-package.mjs",
     "prepack": "npm run build",
-    "test": "npm run build && node --test tests/*.test.mjs",
+    "test": "npm run generate:check && npm run build && node --test tests/*.test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.cjs.json --noEmit"
   },
   "dependencies": {
@@ -41,11 +43,13 @@
     "commander": "^14.0.3",
     "open": "^11.0.0",
     "proper-lockfile": "^4.1.2",
+    "ws": "^8.18.0",
     "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@types/node": "^20.17.0",
     "@types/proper-lockfile": "^4.1.4",
+    "@types/ws": "^8.5.13",
     "typescript": "^6.0.0"
   },
   "license": "Apache-2.0"

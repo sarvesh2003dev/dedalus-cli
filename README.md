@@ -38,12 +38,12 @@ npm install -g dedalus-cli
 dedalus [resource] [command] [flags]
 ```
 
-The Scalar code generator owns generated software development kit (SDK) and
-resource-command files. Dedalus-specific behavior
-lives under `src/custom` and joins the generated command tree through
+Scalar owns the low-level software development kit (SDK). The resource-command
+table and API reference are deterministically regenerated from
+`openapi.augmented.json` with `npm run generate:commands`. Dedalus-specific
+behavior lives under `src/custom` and joins that command tree through
 `addDedalusCommands` in `src/commands/index.ts`. Keep authentication, stored
-credentials, and other handwritten commands behind that boundary so Scalar can
-regenerate the API surface without replacing them.
+credentials, and other handwritten commands behind that boundary.
 
 See the [API reference](./api.md) for every available operation.
 
@@ -68,11 +68,11 @@ dedalus completion fish | source
 
 ## Manual Pages
 
-Installing the package globally also installs man pages. `man dedalus` lists every command, and each command has its own page named after the command with spaces and `:` replaced by `-`.
+Installing the package globally also installs man pages. `man dedalus` lists the command groups and global options, while `man dedalus-completion` documents shell completion.
 
 ```sh
 man dedalus
-man dedalus-<resource>-<command>
+man dedalus-completion
 ```
 
 <br />
