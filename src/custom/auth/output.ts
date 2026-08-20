@@ -48,30 +48,34 @@ export const formatDedalusError = (
 
   if (!selected || !isSDKError(error)) return undefined
   if (selected.source === 'none') {
-    return authError('cli_no_credential', "Not logged in. Run 'dedalus auth login'.", false, undefined, 'none')
+    return authError({
+      code: 'cli_no_credential',
+      message: "Not logged in. Run 'dedalus auth login'.",
+      retryable: false,
+      source: 'none',
+    })
   }
 
   const status = validHTTPStatus(error.status)
   if (status === undefined) {
-    return authError(
-      'cli_network_error',
-      'Dedalus could not be reached. Check your connection and try again.',
-      true,
-      undefined,
-      selected.source,
-    )
+    return authError({
+      code: 'cli_network_error',
+      message: 'Dedalus could not be reached. Check your connection and try again.',
+      retryable: true,
+      source: selected.source,
+    })
   }
 
   const remoteCode = serverErrorCode(error.error)
   const code = remoteCode ?? defaultHTTPCode(status)
   const remoteRetryable = serverRetryable(error.error)
-  return authError(
+  return authError({
     code,
-    remoteCode ? safeServerMessage(status) : defaultHTTPMessage(status, selected),
-    remoteRetryable ?? (status === 408 || status === 429 || status >= 500),
-    status,
-    selected.source,
-  )
+    message: remoteCode ? safeServerMessage(status) : defaultHTTPMessage(status, selected),
+    retryable: remoteRetryable ?? (status === 408 || status === 429 || status >= 500),
+    httpStatus: status,
+    source: selected.source,
+  })
 }
 
 const isSDKError = (error: unknown): error is { readonly status?: unknown; readonly error?: unknown } =>
@@ -82,13 +86,21 @@ const validHTTPStatus = (value: unknown): number | undefined =>
     ? value
     : undefined
 
-const authError = (
-  code: string,
-  message: string,
-  retryable: boolean,
-  httpStatus?: number,
-  source?: CredentialSource,
-): Record<string, unknown> => ({
+type AuthErrorOptions = {
+  readonly code: string
+  readonly message: string
+  readonly retryable: boolean
+  readonly httpStatus?: number
+  readonly source?: CredentialSource
+}
+
+const authError = ({
+  code,
+  message,
+  retryable,
+  httpStatus,
+  source,
+}: AuthErrorOptions): Record<string, unknown> => ({
   error: {
     code,
     message,
@@ -226,13 +238,21 @@ export const logoutOutput = (result: LogoutResult): AuthOutput => result.status 
       },
     }
 
-export const runAuthAction = async (
-  action: () => Promise<AuthOutput>,
-  source: CredentialSource,
-  json: boolean,
-  writeOutput: (value: string) => void,
-  writeError: (value: string) => void,
-): Promise<void> => {
+type RunAuthActionOptions = {
+  readonly action: () => Promise<AuthOutput>
+  readonly source: CredentialSource
+  readonly json: boolean
+  readonly writeOutput: (value: string) => void
+  readonly writeError: (value: string) => void
+}
+
+export const runAuthAction = async ({
+  action,
+  source,
+  json,
+  writeOutput,
+  writeError,
+}: RunAuthActionOptions): Promise<void> => {
   try {
     const output = await action()
     writeOutput(`${json ? JSON.stringify(output.value) : output.message}\n`)

@@ -46,14 +46,23 @@ export type UserInfo = {
   readonly organizationName?: string
 }
 
-export const requestTokenSet = async (
-  issuer: URL,
-  body: URLSearchParams,
-  request: typeof globalThis.fetch,
-  now: () => number,
-  previousRefreshToken: string | undefined,
-  networkErrorCode: string,
-): Promise<TokenSet> => {
+type TokenRequest = {
+  readonly issuer: URL
+  readonly body: URLSearchParams
+  readonly request: typeof globalThis.fetch
+  readonly now: () => number
+  readonly previousRefreshToken?: string
+  readonly networkErrorCode: string
+}
+
+export const requestTokenSet = async ({
+  issuer,
+  body,
+  request,
+  now,
+  previousRefreshToken,
+  networkErrorCode,
+}: TokenRequest): Promise<TokenSet> => {
   let response: Response
   try {
     response = await request(new URL('/oauth/token', issuer), {

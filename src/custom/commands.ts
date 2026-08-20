@@ -114,13 +114,13 @@ const createAuthCommand = ({
   auth.command('login')
     .description('Sign in through Clerk and store the OAuth session')
     .option('--json', 'Print structured JSON output')
-    .action(async (_commandOptions: unknown, command: Command) => runAuthAction(
-      async () => loginOutput(await operations().login()),
-      'oauth_session',
-      jsonRequested(command),
+    .action(async (_commandOptions: unknown, command: Command) => runAuthAction({
+      action: async () => loginOutput(await operations().login()),
+      source: 'oauth_session',
+      json: jsonRequested(command),
       writeOutput,
       writeError,
-    ))
+    }))
 
   auth.command('status')
     .description('Show the active credential source without revealing secrets')
@@ -137,25 +137,25 @@ const createAuthCommand = ({
         readonly bearerAuth?: string
         readonly xApiKey?: string
       }>()
-      return runAuthAction(
-        async () => statusOutput(await operations().status(flags, Boolean(commandOptions.offline))),
-        intendedCredential(flags, environment).source,
-        jsonRequested(command),
+      return runAuthAction({
+        action: async () => statusOutput(await operations().status(flags, Boolean(commandOptions.offline))),
+        source: intendedCredential(flags, environment).source,
+        json: jsonRequested(command),
         writeOutput,
         writeError,
-      )
+      })
     })
 
   auth.command('logout')
     .description('Revoke the provider token when possible and remove local tokens')
     .option('--json', 'Print structured JSON output')
-    .action(async (_commandOptions: unknown, command: Command) => runAuthAction(
-      async () => logoutOutput(await operations().logout()),
-      'oauth_session',
-      jsonRequested(command),
+    .action(async (_commandOptions: unknown, command: Command) => runAuthAction({
+      action: async () => logoutOutput(await operations().logout()),
+      source: 'oauth_session',
+      json: jsonRequested(command),
       writeOutput,
       writeError,
-    ))
+    }))
 
   auth.action(() => auth.help())
   return auth
@@ -261,18 +261,17 @@ const installCredentialInjection = (
     }>()
     const intended = intendedCredential(flags, environment)
     recordCredentialSource(action, intended)
-    setCredentialOptions(action, null, null, null)
+    setCredentialOptions(action, { apiKey: null, xApiKey: null, bearerAuth: null })
 
     try {
       const selected = await selectedCredential({ flags, environment }, credentialStore)
       if (!selected) {
         recordCredentialSource(action, { source: 'none' })
-        setCredentialOptions(
-          action,
-          null,
-          null,
-          rejectedCredential(new CredentialStorageError('not_logged_in')),
-        )
+        setCredentialOptions(action, {
+          apiKey: null,
+          xApiKey: null,
+          bearerAuth: rejectedCredential(new CredentialStorageError('not_logged_in')),
+        })
         return
       }
       recordCredentialSource(action, {
@@ -285,14 +284,18 @@ const installCredentialInjection = (
         const gatewayURL = cliOAuthGatewayURL(environment, flags.baseUrl)
         const accessToken = await accessTokenForCommand(credentialStore(), authProvider())
         setCommandOption(action, 'baseUrl', gatewayURL)
-        setCredentialOptions(action, null, null, accessToken)
+        setCredentialOptions(action, { apiKey: null, xApiKey: null, bearerAuth: accessToken })
       } else if (selected.transport === 'bearer') {
-        setCredentialOptions(action, selected.value, null, null)
+        setCredentialOptions(action, { apiKey: selected.value, xApiKey: null, bearerAuth: null })
       } else {
-        setCredentialOptions(action, null, selected.value, null)
+        setCredentialOptions(action, { apiKey: null, xApiKey: selected.value, bearerAuth: null })
       }
     } catch (error) {
-      setCredentialOptions(action, null, null, rejectedCredential(error))
+      setCredentialOptions(action, {
+        apiKey: null,
+        xApiKey: null,
+        bearerAuth: rejectedCredential(error),
+      })
     }
   })
 }
@@ -355,17 +358,18 @@ const intendedCredential = (
   return { source: 'oauth_session' }
 }
 
-const setCredentialOptions = (
-  action: Command,
-  apiKey: unknown,
-  xApiKey: unknown,
-  bearerAuth: unknown,
-): void => {
+type CredentialOptionValues = {
+  readonly apiKey: unknown
+  readonly xApiKey: unknown
+  readonly bearerAuth: unknown
+}
+
+const setCredentialOptions = (action: Command, values: CredentialOptionValues): void => {
   let current: Command | null = action
   while (current) {
-    current.setOptionValueWithSource('apiKey', apiKey, 'cli')
-    current.setOptionValueWithSource('xApiKey', xApiKey, 'cli')
-    current.setOptionValueWithSource('bearerAuth', bearerAuth, 'cli')
+    current.setOptionValueWithSource('apiKey', values.apiKey, 'cli')
+    current.setOptionValueWithSource('xApiKey', values.xApiKey, 'cli')
+    current.setOptionValueWithSource('bearerAuth', values.bearerAuth, 'cli')
     current = current.parent
   }
 }

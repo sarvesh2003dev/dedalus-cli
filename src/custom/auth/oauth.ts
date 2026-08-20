@@ -106,18 +106,18 @@ export const createClerkAuthProvider = (
     },
     refresh: async (session) => {
       requireProviderSession(session, issuer, clientId)
-      const tokens = await requestTokenSet(
-        new URL(issuer),
-        new URLSearchParams({
+      const tokens = await requestTokenSet({
+        issuer: new URL(issuer),
+        body: new URLSearchParams({
           grant_type: 'refresh_token',
           client_id: clientId,
           refresh_token: session.refreshToken,
         }),
         request,
         now,
-        session.refreshToken,
-        'refresh_failed',
-      )
+        previousRefreshToken: session.refreshToken,
+        networkErrorCode: 'refresh_failed',
+      })
       return {
         ...session,
         accessToken: tokens.accessToken,
@@ -376,9 +376,9 @@ const completeOAuth = async (
   dependencies: ClerkOAuthDependencies,
 ): Promise<OAuthSession> => {
   const request = dependencies.fetch ?? globalThis.fetch
-  const tokens = await requestTokenSet(
-    configuration.issuer,
-    new URLSearchParams({
+  const tokens = await requestTokenSet({
+    issuer: configuration.issuer,
+    body: new URLSearchParams({
       grant_type: 'authorization_code',
       client_id: configuration.clientId,
       code,
@@ -386,10 +386,9 @@ const completeOAuth = async (
       code_verifier: verifier,
     }),
     request,
-    dependencies.now ?? Date.now,
-    undefined,
-    'token_exchange_failed',
-  )
+    now: dependencies.now ?? Date.now,
+    networkErrorCode: 'token_exchange_failed',
+  })
   const user = await fetchUserInfo(configuration.issuer, tokens.accessToken, request)
   return sessionFrom(configuration.issuer.origin, configuration.clientId, tokens, user)
 }
