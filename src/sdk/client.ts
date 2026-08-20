@@ -810,6 +810,8 @@ export class Dedalus {
     if (apiKey) return { Authorization: `Bearer ${apiKey}` };
     const xAPIKey = this.resolveAuthOptionSync("xAPIKey", this.xAPIKey);
     if (xAPIKey) return { "x-api-key": xAPIKey };
+    const bearerAuth = this.resolveAuthOptionSync("bearerAuth", this.bearerAuth);
+    if (bearerAuth) return { Authorization: `Bearer ${bearerAuth}` };
     return {};
   }
 
@@ -898,4 +900,3 @@ const cookieHeaderHas = (value: string | null, name: string): boolean => {
   const target = encodeURIComponent(name) + "=";
   return value.split(";").some((cookie) => cookie.trim().startsWith(target));
 };
-

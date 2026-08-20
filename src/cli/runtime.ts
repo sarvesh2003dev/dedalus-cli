@@ -297,7 +297,7 @@ const runGeneratedCommand = async (
     const result = method(...call.args)
 
     if (definition.transport === "websocket") {
-      await handleWebSocket(result, call.params, outputOptions)
+      await handleWebSocket(result, call.params, call.stdin, outputOptions)
       return
     }
 
@@ -363,7 +363,11 @@ const callArguments = async (
   definition: CliCommandDefinition,
   options: Record<string, unknown>,
   positionalValues: readonly unknown[],
-): Promise<{ readonly args: readonly unknown[]; readonly params: Record<string, unknown> }> => {
+): Promise<{
+  readonly args: readonly unknown[]
+  readonly params: Record<string, unknown>
+  readonly stdin: Record<string, unknown>
+}> => {
   const positionalParams: Record<string, unknown> = {}
   definition.positional.forEach((param, index) => {
     const value = positionalValues[index] ?? options[param.optionKey]
@@ -387,13 +391,16 @@ const callArguments = async (
   }
 
   const stdin = await readStdinValue()
-  const params = mergeObjects(stdin, { ...flagParams, ...positionalParams })
+  const params = mergeObjects(
+    definition.transport === "websocket" ? {} : stdin,
+    { ...flagParams, ...positionalParams },
+  )
   const positionalArgs = definition.positional.map((param) => params[param.paramKey])
   const sdkParams = definition.transport === "websocket" ? omitParams(params, ["send"]) : params
 
-  if (definition.callShape === "options") return { args: [...positionalArgs, undefined], params }
-  if (definition.callShape === "body") return { args: [...positionalArgs, bodyValue(sdkParams, definition), undefined], params }
-  return { args: [...positionalArgs, paramsValue(sdkParams, definition), undefined], params }
+  if (definition.callShape === "options") return { args: [...positionalArgs, undefined], params, stdin }
+  if (definition.callShape === "body") return { args: [...positionalArgs, bodyValue(sdkParams, definition), undefined], params, stdin }
+  return { args: [...positionalArgs, paramsValue(sdkParams, definition), undefined], params, stdin }
 }
 
 const paramsValue = (params: Record<string, unknown>, definition: CliCommandDefinition): unknown => {
@@ -439,14 +446,12 @@ const readStdinSource = async (): Promise<string> => {
   const chunks: Buffer[] = []
   const done = new Promise<string>((resolve, reject) => {
     const cleanup = () => {
-      clearTimeout(timer)
       processStdin.off("data", onData)
       processStdin.off("end", onEnd)
       processStdin.off("error", onError)
       processStdin.pause()
     }
     const onData = (chunk: Buffer | string) => {
-      clearTimeout(timer)
       chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
     }
     const onEnd = () => {
@@ -457,10 +462,6 @@ const readStdinSource = async (): Promise<string> => {
       cleanup()
       reject(error)
     }
-    const timer = setTimeout(() => {
-      cleanup()
-      resolve("")
-    }, 25)
     processStdin.on("data", onData)
     processStdin.on("end", onEnd)
     processStdin.on("error", onError)
@@ -567,7 +568,12 @@ const countsTowardLimit = (item: unknown, options: OutputOptions): boolean => {
 }
 
 // WebSocket SDKs expose lifecycle events as iterator values; error events should fail CLI commands.
-const handleWebSocket = async (socket: unknown, params: Record<string, unknown>, options: OutputOptions): Promise<void> => {
+const handleWebSocket = async (
+  socket: unknown,
+  params: Record<string, unknown>,
+  stdin: Record<string, unknown>,
+  options: OutputOptions,
+): Promise<void> => {
   const closer = () => {
     closeSocket(socket, "interrupted")
   }
@@ -577,10 +583,7 @@ const handleWebSocket = async (socket: unknown, params: Record<string, unknown>,
     await Promise.resolve()
     const sendValue = params.send
     if (sendValue !== undefined) sendSocketValue(socket, sendValue)
-    if (!processStdin.isTTY) {
-      const stdin = await readStdinValue()
-      if (Object.keys(stdin).length > 0) sendSocketValue(socket, stdin.body ?? stdin)
-    }
+    if (Object.keys(stdin).length > 0) sendSocketValue(socket, stdin.body ?? stdin)
     await output
   } finally {
     process.off("SIGINT", closer)
