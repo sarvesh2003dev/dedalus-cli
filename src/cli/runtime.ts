@@ -286,11 +286,11 @@ const runGeneratedCommand = async (
     const method = sdkMethod(client, definition)
     const call = await callArguments(definition, command.opts<Record<string, unknown>>(), positionalValues)
 
-    // Required positionals are validated here (not by Commander) because each one may also be
-    // supplied through its flag spelling or stdin; `call.params` has all sources merged.
-    for (const param of definition.positional) {
+    // Required values are validated here (not by Commander) because each one may also be supplied
+    // through a flag, positional argument, or stdin; `call.params` has all sources merged.
+    for (const param of [...definition.positional, ...definition.flags]) {
       if (param.required && call.params[param.paramKey] === undefined) {
-        command.error("error: missing required argument '" + param.name + "'")
+        command.error("error: missing required value '" + param.name + "'")
       }
     }
 
@@ -587,6 +587,7 @@ const handleWebSocket = async (
     await output
   } finally {
     process.off("SIGINT", closer)
+    closeSocket(socket, "finished")
   }
 }
 
