@@ -74,14 +74,17 @@ keyring when a desktop secret service is available; otherwise it uses
 lock. Windows does not silently use the weaker file path when its keyring is
 unavailable.
 
-| Export | Purpose |
-| --- | --- |
-| `AuthProvider` | Provider-neutral login, refresh, and revocation contract. |
-| `createClerkAuthProvider` | Clerk V1 implementation of `AuthProvider`. |
-| `CredentialStore` | Protected provider-neutral OAuth session storage. |
-| `resolveCredential` | Shared workload-key and OAuth precedence. |
-| `accessTokenForCommand` | Refreshes under lock and returns one access token. |
-| `login`, `status`, `logout` | Own the local OAuth lifecycle. |
+The adapter exposes these explicit ownership boundaries:
+
+| Boundary | Classification | Owner and guarantee |
+| --- | --- | --- |
+| `AuthProvider` | Provider adapter | Clerk implements login, refresh, and revocation without leaking into generated commands. |
+| `CredentialStore` | Authoritative local persistence | The CLI protects and serializes the provider-neutral OAuth session. |
+| `resolveCredential` | Authoritative local selection | The CLI selects exactly one workload or OAuth credential by the precedence above. |
+| `login`, `status`, `logout`, `accessTokenForCommand` | Authoritative local lifecycle | The CLI locks refresh and persistence before returning a usable token. |
+| `addDedalusCommands` | Generated-code integration | Handwritten code injects one selected credential into Scalar-owned commands. |
+| Browser sign-in page | Neighboring surface | The website forwards the fragment payload; it does not own OAuth state or tokens. |
+| Admin API gateway and DCS | Downstream enforcement | The gateway verifies membership and resolves the canonical service key; DCS verifies actor context. |
 
 Commands:
 
