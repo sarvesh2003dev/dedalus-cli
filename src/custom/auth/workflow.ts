@@ -1,3 +1,10 @@
+/**
+ * Stored OAuth 2.0 session lifecycle for command-line authentication.
+ *
+ * Login, refresh, status, and logout run through the credential-store lock.
+ * Provider and organization identity cannot change during a stored session.
+ */
+
 import type { CredentialResolutionOptions, CredentialStore, ResolvedCredential } from './credentials.js'
 import { CredentialStorageError, resolveCredential } from './credentials.js'
 import type { AuthProvider, OAuthSession, OAuthSessionMetadata } from './types.js'

@@ -1,6 +1,6 @@
 # Command-line authentication
 
-This directory owns the handwritten V1 command-line interface (CLI)
+This directory owns the handwritten version 1 command-line interface (CLI)
 authentication adapter. Scalar owns the software development kit (SDK) and
 resource commands. Generated commands receive one selected credential without
 depending on Clerk. Browser login uses OAuth 2.0 Authorization Code with S256
@@ -28,7 +28,7 @@ sequenceDiagram
     DCS->>DCS: Verify actor context for the managed key
 ```
 
-Clerk is the V1 OAuth 2.0 issuer. `oauth.ts` requests only `offline_access` and
+Clerk is the version 1 OAuth 2.0 issuer. `oauth.ts` requests only `offline_access` and
 `user:org:read`. It verifies callback state, requires an organization-bound
 userinfo response, and never embeds a client secret. Code exchange, refresh,
 userinfo, and revocation requests do not follow redirects. The optional
@@ -37,12 +37,13 @@ in a fragment. OAuth state therefore does not enter website request or
 analytics logs. The website reads that fragment in the browser and immediately
 continues to Clerk.
 
-The command sends the Clerk access token only to the Admin API `/dcs` gateway.
+The command sends the Clerk access token only to the Admin application
+programming interface (API) `/dcs` gateway.
 The gateway verifies the token and current Clerk organization membership,
 resolves the organization's canonical service account, decrypts its API key on
-the server, and forwards the request to DCS with signed human actor context.
-DCS accepts a managed service-account key only when that context verifies. The
-raw canonical API key never enters the CLI.
+the server, and forwards the request to Dedalus Cloud Services (DCS) with signed
+human actor context. DCS accepts a managed service-account key only when that
+context verifies. The raw canonical API key never enters the CLI.
 
 The CLI stores Clerk's access and refresh tokens plus non-secret identity and
 organization metadata. It does not create, retrieve, display, or store the
@@ -97,15 +98,16 @@ whether provider revocation was confirmed. Every auth command accepts `--json`
 and excludes access tokens, refresh tokens, authorization codes, PKCE values,
 state, and API-key plaintext.
 
-The checked-in V1 bundle targets development:
+The checked-in version 1 bundle targets development:
 
 - Clerk issuer: `https://neat-gator-21.clerk.accounts.dev`
 - Browser handoff: `https://dev.dedaluslabs.ai/cli/sign-in`
 - Gateway: `https://dev.admin.api.dedaluslabs.ai/dcs`
 
-`DEDALUS_CLERK_ISSUER` and `DEDALUS_CLERK_CLIENT_ID` must be overridden
-together. `DEDALUS_SIGN_IN_URL` may independently point at a local loopback
-website. V1 accepts only a Clerk development issuer and sends its token only to
+If set, `DEDALUS_CLERK_ISSUER` and `DEDALUS_CLERK_CLIENT_ID` must exactly match
+the checked-in development bundle; arbitrary issuer or client overrides fail
+closed. `DEDALUS_SIGN_IN_URL` may independently point at a local loopback
+website. Version 1 accepts only a Clerk development issuer and sends its token only to
 the checked-in development Admin API gateway. Production requires a separate
 reviewed issuer, client, and gateway bundle; arbitrary gateway overrides fail
 closed.

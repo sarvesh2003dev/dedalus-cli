@@ -1,3 +1,10 @@
+/**
+ * Credential selection and protected storage for the Dedalus command-line interface.
+ *
+ * This module selects exactly one workload key or stored OAuth 2.0 session.
+ * It also owns the operating-system keyring and private-file storage adapters.
+ */
+
 import { randomUUID } from 'node:crypto'
 import { constants, type Stats } from 'node:fs'
 import { type FileHandle, lstat, mkdir, open, rename, unlink } from 'node:fs/promises'

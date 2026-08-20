@@ -1,3 +1,10 @@
+/**
+ * Provider-neutral contracts for command-line OAuth 2.0 sessions.
+ *
+ * Clerk implements these contracts in `oauth.ts`. Credential storage and
+ * command lifecycle code depend on these shapes without depending on Clerk.
+ */
+
 export type OAuthSession = {
   readonly version: 1
   readonly issuer: string

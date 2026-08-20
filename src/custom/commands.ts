@@ -1,3 +1,10 @@
+/**
+ * Dedalus-owned commands and authentication for the generated command-line interface.
+ *
+ * Scalar generates resource commands. This adapter adds `auth`, selects one
+ * credential, and maps authentication failures without exposing secrets.
+ */
+
 import { Command } from 'commander'
 
 import {

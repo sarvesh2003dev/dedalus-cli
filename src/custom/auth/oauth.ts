@@ -1,3 +1,10 @@
+/**
+ * Clerk OAuth 2.0 Authorization Code flow for the Dedalus command-line interface.
+ *
+ * The flow uses Proof Key for Code Exchange (PKCE) and a one-use loopback
+ * callback. It returns a provider-neutral session for storage and refresh.
+ */
+
 import { createHash, randomBytes as nodeRandomBytes, timingSafeEqual } from 'node:crypto'
 import { createServer, type Server } from 'node:http'
 

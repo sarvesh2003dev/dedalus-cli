@@ -38,13 +38,12 @@ npm install -g dedalus-cli
 dedalus [resource] [command] [flags]
 ```
 
-Scalar owns generated SDK and resource-command files. Dedalus-specific behavior
+The Scalar code generator owns generated software development kit (SDK) and
+resource-command files. Dedalus-specific behavior
 lives under `src/custom` and joins the generated command tree through
 `addDedalusCommands` in `src/commands/index.ts`. Keep authentication, stored
 credentials, and other handwritten commands behind that boundary so Scalar can
 regenerate the API surface without replacing them.
-
-The examples in the following sections assume a `client` configured as shown above.
 
 See the [API reference](./api.md) for every available operation.
 
@@ -99,7 +98,7 @@ falls back to another source. `--offline` reads only stored status metadata.
 Add `--json` to auth or generated resource commands for structured output that
 excludes secret values.
 
-The checked-in V1 authentication bundle targets the development Clerk
+The checked-in version 1 authentication bundle targets the development Clerk
 application and `https://dev.admin.api.dedaluslabs.ai/dcs`. OAuth sessions are
 accepted only for a Clerk development issuer and are sent only to that exact
 gateway. Production needs its own checked-in issuer, client, and gateway bundle;
