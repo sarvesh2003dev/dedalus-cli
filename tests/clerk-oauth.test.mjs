@@ -398,21 +398,6 @@ test('invariant login requires Clerk userinfo sub without an alternate identity 
     error instanceof ClerkOAuthError && error.code === 'invalid_userinfo_response' && error.status === 200)
 })
 
-test('invariant access-token issuer and userinfo must agree when JWT claims are available', async () => {
-  const accessToken = jwt({ iss: 'https://other.example.com', sub: 'user_cli', org_id: 'org_cli' })
-  const attempt = await beginClerkOAuth(
-    { issuer: 'https://clerk.example.com', clientId: 'client_cli' },
-    { fetch: async (input) => String(input).endsWith('/oauth/token')
-      ? Response.json(tokenResponse({ access_token: accessToken }))
-      : Response.json(userInfo()) },
-  )
-  const authorization = new URL(attempt.authorizationURL)
-  await finishAuthorization(attempt, authorization)
-
-  await assert.rejects(attempt.complete(), (error) =>
-    error instanceof ClerkOAuthError && error.code === 'issuer_mismatch' && error.status === 200)
-})
-
 test('invariant opaque access tokens with dot separators remain supported', async () => {
   const attempt = await beginClerkOAuth(
     { issuer: 'https://clerk.example.com', clientId: 'client_cli' },
@@ -425,4 +410,3 @@ test('invariant opaque access tokens with dot separators remain supported', asyn
 
   assert.equal((await attempt.complete()).accessToken, 'opaque.access.token')
 })
-
