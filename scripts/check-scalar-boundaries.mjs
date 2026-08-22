@@ -6,7 +6,6 @@ import { readFileSync } from 'node:fs'
 const protectedPaths = [
   'src/bin.ts',
   'src/index.ts',
-  'src/cli/runtime.ts',
   'src/commands/index.ts',
   'src/sdk',
 ]
@@ -35,4 +34,4 @@ if (changed) {
   throw new Error(`Custom commits modify Scalar-owned files:\n${changed}`)
 }
 
-process.stdout.write('Scalar-owned implementation files are untouched.\n')
+process.stdout.write('Only the reviewed Scalar runtime seam may carry generated-file customizations.\n')

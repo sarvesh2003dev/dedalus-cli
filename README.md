@@ -38,13 +38,15 @@ npm install -g dedalus-cli
 dedalus [resource] [command] [flags]
 ```
 
-Scalar owns the low-level software development kit (SDK) and its generated CLI
-entry points. The published `dedalus` executable uses the Dedalus-owned entry
-point under `src/custom`, leaving Scalar-owned implementation files untouched.
+Scalar owns the low-level software development kit (SDK), CLI runtime, and its
+generated entry points. The published `dedalus` executable uses the
+Dedalus-owned entry point under `src/custom` and imports Scalar's runtime
+directly. Narrow runtime hooks are maintained on `scalar-next` through Scalar's
+three-way merge; the SDK client and generated entry points remain untouched.
 The resource-command table and API reference are deterministically regenerated
 from `openapi.augmented.json` with `npm run generate:commands`. Keep
-authentication, stored credentials, runtime adaptations, and other handwritten
-commands behind the `src/custom` boundary.
+authentication, stored credentials, and other handwritten commands behind the
+`src/custom` boundary.
 
 See the [API reference](./api.md) for every available operation.
 

@@ -1,4 +1,4 @@
-// File generated from our OpenAPI spec by Scalar. See README.md for details.
+// File generated from our OpenAPI spec by Scalar and narrowly customized on scalar-next.
 
 import { stdin as processStdin, stdout as processStdout } from 'node:process'
 
@@ -70,6 +70,7 @@ export type CreateProgramOptions = {
   readonly defaultErrorFormat: OutputFormat
   readonly clientOptions: readonly CliClientOptionDefinition[]
   readonly commands: readonly CliCommandDefinition[]
+  readonly formatError?: (error: unknown, command: Command) => Record<string, unknown> | undefined
   // Completion script per shell, generated alongside the command table. Absent when the SDK
   // config disables shell completions, in which case no `completion` command is registered.
   readonly completions?: Readonly<Record<string, string>>
@@ -99,7 +100,7 @@ type GlobalOptions = {
   readonly maxItems?: string
 }
 
-export const createProgram = ({ SDK, binaryName, version, description, defaultFormat, defaultErrorFormat, clientOptions, commands, completions }: CreateProgramOptions): Command => {
+export const createProgram = ({ SDK, binaryName, version, description, defaultFormat, defaultErrorFormat, clientOptions, commands, formatError, completions }: CreateProgramOptions): Command => {
   const program = new Command()
   program
     .enablePositionalOptions()
@@ -123,7 +124,7 @@ export const createProgram = ({ SDK, binaryName, version, description, defaultFo
     program.option("--" + option.name + " <value>", clientOptionDescription(option))
   }
 
-  for (const definition of commands) addGeneratedCommand(program, SDK, clientOptions, definition)
+  for (const definition of commands) addGeneratedCommand(program, SDK, clientOptions, definition, formatError)
 
   if (completions) addCompletionCommand(program, binaryName, completions)
 
@@ -178,6 +179,7 @@ const addGeneratedCommand = (
   SDK: CreateProgramOptions["SDK"],
   clientOptions: readonly CliClientOptionDefinition[],
   definition: CliCommandDefinition,
+  formatError: CreateProgramOptions['formatError'],
 ): void => {
   const parent = ensureCommandPath(program, definition.commandPath.slice(0, -1))
   const commandName = definition.commandPath.at(-1) ?? definition.methodName
@@ -234,7 +236,7 @@ const addGeneratedCommand = (
     const command = args.at(-1)
     if (!(command instanceof Command)) throw new Error("Expected Commander command context")
     const positionalValues = args.slice(0, -1)
-    await runGeneratedCommand(SDK, clientOptions, definition, command, positionalValues)
+    await runGeneratedCommand(SDK, clientOptions, definition, command, positionalValues, formatError)
   })
 
   parent.addCommand(command)
@@ -261,6 +263,7 @@ const runGeneratedCommand = async (
   definition: CliCommandDefinition,
   command: Command,
   positionalValues: readonly unknown[],
+  formatError: CreateProgramOptions['formatError'],
 ): Promise<void> => {
   const rootOptions = command.optsWithGlobals<GlobalOptions>()
   const commandOptions = command.opts<GlobalOptions>()
@@ -283,18 +286,18 @@ const runGeneratedCommand = async (
     const method = sdkMethod(client, definition)
     const call = await callArguments(definition, command.opts<Record<string, unknown>>(), positionalValues)
 
-    // Required positionals are validated here (not by Commander) because each one may also be
-    // supplied through its flag spelling or stdin; `call.params` has all sources merged.
-    for (const param of definition.positional) {
+    // Required values are validated here (not by Commander) because each one may also be supplied
+    // through a flag, positional argument, or stdin; `call.params` has all sources merged.
+    for (const param of [...definition.positional, ...definition.flags]) {
       if (param.required && call.params[param.paramKey] === undefined) {
-        command.error("error: missing required argument '" + param.name + "'")
+        command.error("error: missing required value '" + param.name + "'")
       }
     }
 
     const result = method(...call.args)
 
     if (definition.transport === "websocket") {
-      await handleWebSocket(result, call.params, outputOptions)
+      await handleWebSocket(result, call.params, call.stdin, outputOptions)
       return
     }
 
@@ -311,7 +314,7 @@ const runGeneratedCommand = async (
 
     await writeOutput(resolved, outputOptions)
   } catch (error) {
-    await writeError(error, errorOptions, clientOptions)
+    await writeError(error, errorOptions, clientOptions, command, formatError)
     process.exitCode = 1
   }
 }
@@ -360,7 +363,11 @@ const callArguments = async (
   definition: CliCommandDefinition,
   options: Record<string, unknown>,
   positionalValues: readonly unknown[],
-): Promise<{ readonly args: readonly unknown[]; readonly params: Record<string, unknown> }> => {
+): Promise<{
+  readonly args: readonly unknown[]
+  readonly params: Record<string, unknown>
+  readonly stdin: Record<string, unknown>
+}> => {
   const positionalParams: Record<string, unknown> = {}
   definition.positional.forEach((param, index) => {
     const value = positionalValues[index] ?? options[param.optionKey]
@@ -384,13 +391,16 @@ const callArguments = async (
   }
 
   const stdin = await readStdinValue()
-  const params = mergeObjects(stdin, { ...flagParams, ...positionalParams })
+  const params = mergeObjects(
+    definition.transport === "websocket" ? {} : stdin,
+    { ...flagParams, ...positionalParams },
+  )
   const positionalArgs = definition.positional.map((param) => params[param.paramKey])
   const sdkParams = definition.transport === "websocket" ? omitParams(params, ["send"]) : params
 
-  if (definition.callShape === "options") return { args: [...positionalArgs, undefined], params }
-  if (definition.callShape === "body") return { args: [...positionalArgs, bodyValue(sdkParams, definition), undefined], params }
-  return { args: [...positionalArgs, paramsValue(sdkParams, definition), undefined], params }
+  if (definition.callShape === "options") return { args: [...positionalArgs, undefined], params, stdin }
+  if (definition.callShape === "body") return { args: [...positionalArgs, bodyValue(sdkParams, definition), undefined], params, stdin }
+  return { args: [...positionalArgs, paramsValue(sdkParams, definition), undefined], params, stdin }
 }
 
 const paramsValue = (params: Record<string, unknown>, definition: CliCommandDefinition): unknown => {
@@ -436,14 +446,12 @@ const readStdinSource = async (): Promise<string> => {
   const chunks: Buffer[] = []
   const done = new Promise<string>((resolve, reject) => {
     const cleanup = () => {
-      clearTimeout(timer)
       processStdin.off("data", onData)
       processStdin.off("end", onEnd)
       processStdin.off("error", onError)
       processStdin.pause()
     }
     const onData = (chunk: Buffer | string) => {
-      clearTimeout(timer)
       chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
     }
     const onEnd = () => {
@@ -454,10 +462,6 @@ const readStdinSource = async (): Promise<string> => {
       cleanup()
       reject(error)
     }
-    const timer = setTimeout(() => {
-      cleanup()
-      resolve("")
-    }, 25)
     processStdin.on("data", onData)
     processStdin.on("end", onEnd)
     processStdin.on("error", onError)
@@ -564,7 +568,12 @@ const countsTowardLimit = (item: unknown, options: OutputOptions): boolean => {
 }
 
 // WebSocket SDKs expose lifecycle events as iterator values; error events should fail CLI commands.
-const handleWebSocket = async (socket: unknown, params: Record<string, unknown>, options: OutputOptions): Promise<void> => {
+const handleWebSocket = async (
+  socket: unknown,
+  params: Record<string, unknown>,
+  stdin: Record<string, unknown>,
+  options: OutputOptions,
+): Promise<void> => {
   const closer = () => {
     closeSocket(socket, "interrupted")
   }
@@ -574,13 +583,11 @@ const handleWebSocket = async (socket: unknown, params: Record<string, unknown>,
     await Promise.resolve()
     const sendValue = params.send
     if (sendValue !== undefined) sendSocketValue(socket, sendValue)
-    if (!processStdin.isTTY) {
-      const stdin = await readStdinValue()
-      if (Object.keys(stdin).length > 0) sendSocketValue(socket, stdin.body ?? stdin)
-    }
+    if (Object.keys(stdin).length > 0) sendSocketValue(socket, stdin.body ?? stdin)
     await output
   } finally {
     process.off("SIGINT", closer)
+    closeSocket(socket, "finished")
   }
 }
 
@@ -676,8 +683,10 @@ const writeError = async (
   error: unknown,
   options: OutputOptions,
   clientOptions: readonly CliClientOptionDefinition[],
+  command: Command,
+  formatError: CreateProgramOptions['formatError'],
 ): Promise<void> => {
-  const body = transformValue(errorBody(error, clientOptions), options.transform)
+  const body = transformValue(formatError?.(error, command) ?? errorBody(error, clientOptions), options.transform)
   if (options.rawOutput && typeof body === "string") {
     process.stderr.write(body + "\n")
     return

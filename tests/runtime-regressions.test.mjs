@@ -16,7 +16,7 @@ const commandDefinition = (transport) => ({
 })
 
 const programSource = (sdkSource, transport) => `
-  import { createProgram } from './dist/esm/custom/runtime.js'
+  import { createProgram } from './dist/esm/cli/runtime.js'
   ${sdkSource}
   const program = createProgram({
     SDK,
