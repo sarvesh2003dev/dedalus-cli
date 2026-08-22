@@ -3,13 +3,14 @@ import { spawn } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
+import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
 import { WebSocketServer } from 'ws'
 
 import { operationSpecs } from '../dist/esm/commands/operations.generated.js'
 
-const binary = new URL('../dist/esm/bin.js', import.meta.url).pathname
+const binary = fileURLToPath(new URL('../dist/esm/custom/bin.js', import.meta.url))
 
 const runCLI = (args, options = {}) => new Promise((resolve, reject) => {
   const child = spawn(process.execPath, [binary, ...args], { env: options.env ?? process.env })

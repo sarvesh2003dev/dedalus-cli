@@ -13,6 +13,7 @@ jobs:
         with:
           node-version: "20"
       - run: npm install
+      - run: npm run scalar:check
       - run: npm run typecheck
       - run: npm test
       - run: npm run pack:check

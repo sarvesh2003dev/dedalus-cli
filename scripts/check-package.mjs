@@ -3,10 +3,10 @@
 import { spawn } from 'node:child_process'
 
 const requiredFiles = [
-  'dist/cjs/index.js',
-  'dist/esm/bin.js',
-  'dist/esm/index.d.ts',
-  'dist/esm/index.js',
+  'dist/cjs/custom/index.js',
+  'dist/esm/custom/bin.js',
+  'dist/esm/custom/index.d.ts',
+  'dist/esm/custom/index.js',
 ]
 
 const npm = process.env.npm_execpath

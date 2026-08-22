@@ -10,7 +10,7 @@ import {
   formatDedalusError,
 } from '../dist/esm/custom/commands.js'
 import { AuthProviderError } from '../dist/esm/custom/auth/types.js'
-import { getProgram } from '../dist/esm/index.js'
+import { getProgram } from '../dist/esm/custom/index.js'
 
 const session = (overrides = {}) => ({
   version: 1,

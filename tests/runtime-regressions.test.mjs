@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import test from 'node:test'
 
-import { Dedalus } from '../dist/esm/sdk/client.js'
+import { CommandClient } from '../dist/esm/commands/client.js'
 
 const commandDefinition = (transport) => ({
   resourcePath: ['probe'],
@@ -16,7 +16,7 @@ const commandDefinition = (transport) => ({
 })
 
 const programSource = (sdkSource, transport) => `
-  import { createProgram } from './dist/esm/cli/runtime.js'
+  import { createProgram } from './dist/esm/custom/runtime.js'
   ${sdkSource}
   const program = createProgram({
     SDK,
@@ -48,7 +48,7 @@ const runProgram = (source, input, delayMs = 0) => new Promise((resolve, reject)
 })
 
 test('invariant stored OAuth authenticates WebSocket SDK clients', () => {
-  const client = new Dedalus({
+  const client = new CommandClient({
     apiKey: null,
     xAPIKey: null,
     bearerAuth: 'oauth-access-token',

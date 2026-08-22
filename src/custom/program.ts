@@ -1,9 +1,11 @@
-// File generated from our OpenAPI spec by Scalar. See README.md for details.
+/** Dedalus-owned CLI assembly layered over Scalar's generated SDK. */
 
 import type { Command } from 'commander'
-import SDK from '../sdk/index'
-import { createProgram, type CliClientOptionDefinition, type CliCommandDefinition } from '../cli/runtime'
-import { completions } from '../cli/completions'
+import { createProgram, type CliClientOptionDefinition, type CliCommandDefinition } from './runtime.js'
+import { completions } from '../cli/completions.js'
+import { addDedalusCommands, formatDedalusError } from './commands.js'
+import { CommandClient } from '../commands/client.js'
+import { operationSpecs } from '../commands/operations.generated.js'
 
 const clientOptions = [
   {
@@ -62,11 +64,11 @@ const clientOptions = [
   }
 ] as const satisfies readonly CliClientOptionDefinition[]
 
-const commands = [] as const satisfies readonly CliCommandDefinition[]
+const commands = operationSpecs.map(({ command }) => command) satisfies readonly CliCommandDefinition[]
 
 export const getProgram = (): Command =>
-  createProgram({
-    SDK,
+  addDedalusCommands(createProgram({
+    SDK: CommandClient,
     binaryName: "dedalus",
     version: "0.1.0", // x-release-please-version
     description: "CLI for Dedalus",
@@ -74,5 +76,6 @@ export const getProgram = (): Command =>
     defaultErrorFormat: "auto",
     clientOptions,
     commands,
+    formatError: formatDedalusError,
     completions,
-  })
+  }))

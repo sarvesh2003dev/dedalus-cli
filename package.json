@@ -4,17 +4,17 @@
   "description": "Controlplane API for Dedalus Cloud Services (DCS).",
   "type": "module",
   "bin": {
-    "dedalus": "./dist/esm/bin.js"
+    "dedalus": "./dist/esm/custom/bin.js"
   },
-  "main": "./dist/cjs/index.js",
-  "module": "./dist/esm/index.js",
-  "types": "./dist/esm/index.d.ts",
+  "main": "./dist/cjs/custom/index.js",
+  "module": "./dist/esm/custom/index.js",
+  "types": "./dist/esm/custom/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/esm/index.d.ts",
-      "import": "./dist/esm/index.js",
-      "require": "./dist/cjs/index.js",
-      "default": "./dist/esm/index.js"
+      "types": "./dist/esm/custom/index.d.ts",
+      "import": "./dist/esm/custom/index.js",
+      "require": "./dist/cjs/custom/index.js",
+      "default": "./dist/esm/custom/index.js"
     },
     "./package.json": "./package.json"
   },
@@ -32,6 +32,7 @@
     "build": "node scripts/prepare-build.mjs && tsc -p tsconfig.json && tsc -p tsconfig.cjs.json && node scripts/finalize-build.mjs",
     "generate:commands": "node scripts/generate-cli-operations.mjs",
     "generate:check": "node scripts/generate-cli-operations.mjs --check",
+    "scalar:check": "node scripts/check-scalar-boundaries.mjs",
     "pack:check": "node scripts/check-package.mjs",
     "prepack": "npm run build",
     "test": "npm run generate:check && npm run build && node --test tests/*.test.mjs",

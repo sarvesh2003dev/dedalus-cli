@@ -1,4 +1,4 @@
-import SDK, { type ClientOptions } from '../sdk/index.js'
+import SDK, { DedalusError, type ClientOptions } from '../sdk/index.js'
 import { buildHeaders } from '../sdk/internal/headers.js'
 import type { RequestOptions } from '../sdk/internal/request-options.js'
 import { operationSpecs } from './operations.generated.js'
@@ -16,6 +16,17 @@ export class CommandClient extends SDK {
       spec.id,
       (params?: Record<string, unknown>, requestOptions?: RequestOptions) => this.#invoke(spec, params, requestOptions),
     ]))
+  }
+
+  override webSocketAuthHeaders(): Record<string, string> {
+    const headers = super.webSocketAuthHeaders()
+    if (headers.Authorization || headers['x-api-key']) return headers
+    if (this.bearerAuth == null) return {}
+    const bearerAuth = typeof this.bearerAuth === 'function' ? this.bearerAuth() : this.bearerAuth
+    if (typeof bearerAuth !== 'string' || !bearerAuth) {
+      throw new DedalusError("Expected 'bearerAuth' to resolve to a non-empty string.")
+    }
+    return { Authorization: `Bearer ${bearerAuth}` }
   }
 
   #invoke(spec: OperationSpec, rawParams: Record<string, unknown> = {}, requestOptions: RequestOptions = {}): unknown {
