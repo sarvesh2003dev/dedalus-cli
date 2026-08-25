@@ -38,6 +38,12 @@ npm install -g dedalus-cli
 dedalus [resource] [command] [flags]
 ```
 
+Create a machine with the API defaults and open an interactive SSH shell:
+
+```sh
+dedalus machines create --connect
+```
+
 Scalar owns the low-level software development kit (SDK), CLI runtime, and its
 generated entry points. The published `dedalus` executable uses the
 Dedalus-owned entry point under `src/custom` and imports Scalar's runtime
@@ -166,5 +172,6 @@ Generated clients support request timeouts and retry temporary failures such as 
 ## Requirements
 
 - Node.js 20 or newer
+- OpenSSH (`ssh` and `ssh-keygen`) when using `machines create --connect`
 
 Powered by Scalar.
